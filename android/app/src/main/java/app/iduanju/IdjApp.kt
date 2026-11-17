@@ -48,7 +48,7 @@ class IdjApp : Application(), coil.ImageLoaderFactory {
         plugins = app.iduanju.plugin.PluginStore(this)
         tg = app.iduanju.tg.TGStore(this)
         manga = app.iduanju.manga.MangaStore(this)
-        huangguo = app.iduanju.core.huangguo.HuangguoClient(filesDir, app.iduanju.huangguo.PrefsMap(this))
+        huangguo = app.iduanju.core.huangguo.HuangguoClient(filesDir, app.iduanju.huangguo.PrefsMap(this), app.iduanju.huangguo.WebViewCookieJar)
         app.iduanju.core.hls.HLSAdFilter.enabled = settings.adStripEnabled
         updater = app.iduanju.update.AppUpdater(this)
     }

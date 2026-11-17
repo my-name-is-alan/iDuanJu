@@ -72,7 +72,7 @@ struct SiteVerifySheet: View {
         defer { busy = false }
         let src = target.source
         let cookies = await WKWebsiteDataStore.default().httpCookieStore.allCookies()
-        let synced = CFCookies.sync(cookies)
+        let synced = CFCookies.sync(cookies, host: host)
         if let ua = snap?.ua, !ua.isEmpty { SiteUA.set(ua, for: src) }
         let hasClearance = cookies.contains { $0.name == "cf_clearance" && CFCookies.domain($0.domain, matches: host) }
         SiteLog.add("[\(src.label)] 验证页结束（\(force ? "手动完成" : "自动判定")）title=\(snap?.title ?? "-") · 同步 \(synced.count) 个 cookie · cf_clearance=\(hasClearance ? "有" : "无") · UA \(SiteLog.shortUA(src.userAgent))")
@@ -129,7 +129,7 @@ extension CFCookies {
         for c in HTTPCookieStorage.shared.cookies ?? [] where isSiteCookie(c) { HTTPCookieStorage.shared.deleteCookie(c) }
         let store = WKWebsiteDataStore.default().httpCookieStore
         for c in await store.allCookies() where isSiteCookie(c) { await store.deleteCookie(c) }
-        for s in Sites.all { SiteUA.clear(s) }
+        for s in Sites.all + [.huangguo] { SiteUA.clear(s) }
         await SiteHTTP.shared.clearPreferred()
         await MissAVSite.shared.reset()
         SiteLog.add("已清除站点 cookie 与 UA")

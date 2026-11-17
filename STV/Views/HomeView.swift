@@ -339,7 +339,7 @@ private struct HomeFeedPage: View {
             if let legacyError { ErrorStateView(error: legacyError) { Task { await loadLegacy() } } }
             else { cardsSkeleton }
         } else {
-            if case .site = tab, let e = boards.lazy.compactMap({ cache.errors[$0.id] }).first(where: { $0.verifyTarget != nil }) {
+            if let e = boards.lazy.compactMap({ cache.errors[$0.id] }).first(where: { $0.verifyTarget != nil }) {
                 ErrorStateView(error: e) { boards.forEach { cache.load($0, force: true) } }
             }
             ForEach(Array(boards.enumerated()), id: \.element.id) { n, b in
@@ -350,7 +350,7 @@ private struct HomeFeedPage: View {
                         let rest = n == 0 ? items.filter { !heroIds.contains($0.id) } : items
                         HomeShelf(title: b.title, note: nil, items: Array(rest.prefix(12)), more: b)
                     } else if cache.failed.contains(b.id) {
-                        HomeShelf(title: b.title, note: "加载失败，下拉重试", items: [], more: b)
+                        HomeShelf(title: b.title, note: cache.errors[b.id]?.verifyTarget != nil ? "需要验证，点上方「去验证」" : "加载失败，下拉重试", items: [], more: b)
                     } else {
                         VStack(alignment: .leading, spacing: 12) {
                             DSSectionHeader(title: b.title)

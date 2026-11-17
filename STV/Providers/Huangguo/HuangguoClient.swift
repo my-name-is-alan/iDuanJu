@@ -65,14 +65,36 @@ actor HuangguoClient {
     private func fetch(_ url: String, referer: String, headers: [String: String] = [:]) async throws -> Data {
         guard let u = URL(string: url) else { throw ProviderError.invalid("bad url") }
         var r = URLRequest(url: u)
-        r.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
+        r.setValue(Self.userAgent(for: u), forHTTPHeaderField: "User-Agent")
         r.setValue(referer, forHTTPHeaderField: "Referer")
         r.setValue("zh-CN,zh;q=0.9", forHTTPHeaderField: "Accept-Language")
         for (k, v) in headers { r.setValue(v, forHTTPHeaderField: k) }
         let (d, resp) = try await session.data(for: r)
-        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        let http = resp as? HTTPURLResponse
+        let code = http?.statusCode ?? 0
+        if let e = Self.challengeError(url: u, status: code, headers: http?.allHeaderFields ?? [:], body: d) {
+            SiteLog.add("[黄果] Cloudflare \(code) \(url) · UA \(SiteLog.shortUA(Self.userAgent(for: u))) · cookies \(CFCookies.names(for: url).joined(separator: ","))")
+            throw e
+        }
         guard (200..<300).contains(code) else { throw ProviderError.upstream("HTTP \(code)") }
         return d
+    }
+
+    /// huangguo.video sits behind a Cloudflare managed challenge (issue #12). The user passes it once in the
+    /// visible `SiteVerifySheet`; `cf_clearance` is bound to that WebView's UA, so requests to the site's
+    /// hosts must send the learned UA (other huangguo hosts keep the default).
+    static func userAgent(for url: URL) -> String {
+        guard let host = url.host, cfHosts.contains(where: { CFCookies.domain($0, matches: host) }) else { return userAgent }
+        return SiteUA.learned(.huangguo) ?? userAgent
+    }
+    static var cfHosts: [String] { [URL(string: videoBase)?.host ?? "huangguo.video"] }
+
+    /// Non-nil for a Cloudflare interstitial: becomes 「需要验证」 with 去验证 / 重试 instead of a plain failure.
+    /// The verify target is the site root, where the user completes the check in the WebView.
+    static func challengeError(url: URL, status: Int, headers: [AnyHashable: Any], body: Data) -> SiteError? {
+        let text = String(decoding: body.prefix(64_000), as: UTF8.self)
+        guard CFDetect.isChallenge(status: status, headers: headers, body: text) else { return nil }
+        return .needsVerification(.huangguo, "\(url.scheme ?? "https")://\(url.host ?? "")/")
     }
     private func text(_ url: String, referer: String, ttl: TimeInterval = 300) async throws -> String {
         if let (t, s) = textCache[url], Date().timeIntervalSince(t) < ttl { return s }
@@ -195,7 +217,7 @@ actor HuangguoClient {
         guard !needle.isEmpty else { return [] }
         let enc = q.trimmingCharacters(in: .whitespaces).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? needle
         var groups: [[HGSeries]] = [[], [], []]
-        var errors: [String] = []
+        var errors: [Error] = []
         await withTaskGroup(of: (Int, Result<[HGSeries], Error>).self) { g in
             g.addTask { (0, await Self.attempt {
                 let page = Self.videoBase + "/search?q=" + enc
@@ -224,13 +246,14 @@ actor HuangguoClient {
                 return out.filter { $0.title.lowercased().contains(needle) }
             }) }
             for await (i, r) in g {
-                switch r { case .success(let s): groups[i] = s; case .failure(let e): errors.append(e.localizedDescription) }
+                switch r { case .success(let s): groups[i] = s; case .failure(let e): errors.append(e) }
             }
         }
         var seen = Set<String>()
         // Same rule as Android HuangguoClient.blocked: never return minors / non-consent titles.
         let hits = groups.joined().filter { !Self.blocked($0) && seen.insert($0.id).inserted }
-        if hits.isEmpty, errors.count == groups.count, let e = errors.first { throw ProviderError.upstream(e) }
+        if hits.isEmpty, let v = errors.first(where: { $0.verifyTarget != nil }) { throw v }
+        if hits.isEmpty, errors.count == groups.count, let e = errors.first { throw ProviderError.upstream(e.localizedDescription) }
         return hits
     }
 
@@ -314,6 +337,8 @@ actor HuangguoClient {
             }
         case .video:
             referer = Self.videoBase + "/"
+            headers["User-Agent"] = Self.userAgent(for: URL(string: Self.videoBase)!)
+            keyFetchHeaders = headers
             if media.isEmpty, let p = episode.page { media = dataHLS(try await text(p, referer: referer, ttl: 30), p) ?? "" }
         case .legacy:
             let a = try await legacyAccess()

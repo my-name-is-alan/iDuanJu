@@ -212,9 +212,14 @@ struct ErrorStateView: View {
     let error: Error
     let retry: () -> Void
     @State private var verify: VerifyTarget?
+    private var title: String {
+        guard let t = error.verifyTarget else { return "加载失败" }
+        // 黄果 never auto-solves (issue #12): the user verifies in the visible sheet.
+        return t.source == .huangguo ? "需要验证" : "需要站点验证（自动验证未通过）"
+    }
     var body: some View {
         ContentUnavailableView {
-            Label(error.verifyTarget == nil ? "加载失败" : "需要站点验证（自动验证未通过）",
+            Label(title,
                   systemImage: error.verifyTarget == nil ? "wifi.exclamationmark" : "shield.lefthalf.filled")
         } description: {
             Text(error.localizedDescription)

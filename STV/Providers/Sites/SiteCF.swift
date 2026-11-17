@@ -18,6 +18,7 @@ extension DramaSource {
         case .xnxx: XVProvider.xnMirrors
         case .pornhub: PornhubProvider.mirrors
         case .telegram: [TGClient.defaultBase]
+        case .huangguo: [HuangguoClient.videoBase]
         default: []
         }
         return mirrors.compactMap { URL(string: $0)?.host }
@@ -98,7 +99,7 @@ enum CFCookies {
     }
 
     static func isSiteCookie(_ c: HTTPCookie) -> Bool {
-        Sites.all.contains { s in s.siteHosts.contains { domain(c.domain, matches: $0) || domain($0, matches: c.domain.trimmingCharacters(in: CharacterSet(charactersIn: "."))) } }
+        (Sites.all + [.huangguo]).contains { s in s.siteHosts.contains { domain(c.domain, matches: $0) || domain($0, matches: c.domain.trimmingCharacters(in: CharacterSet(charactersIn: "."))) } }
     }
 
     /// Copy WebKit cookies into the URLSession jar (all site cookies, not just the verified host,

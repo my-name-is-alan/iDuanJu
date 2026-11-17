@@ -69,6 +69,7 @@ fun FeedGrid(key: String, cats: List<Pair<String, String>>, load: (String, Int) 
     var hasMore by remember(key, sel) { mutableStateOf(true) }
     var loading by remember(key, sel) { mutableStateOf(false) }
     var error by remember(key, sel) { mutableStateOf<String?>(null) }
+    var verify by remember(key, sel) { mutableStateOf<app.iduanju.core.util.VerificationRequiredException?>(null) }
     val grid = rememberLazyGridState()
 
     suspend fun more() {
@@ -79,8 +80,9 @@ fun FeedGrid(key: String, cats: List<Pair<String, String>>, load: (String, Int) 
             val p = withContext(Dispatchers.IO) { load(cat, page) }
             val seen = items.map { it.seriesId }.toHashSet()
             items.addAll(p.items.filter { seen.add(it.seriesId) })
-            hasMore = p.hasMore; page += 1; error = null
+            hasMore = p.hasMore; page += 1; error = null; verify = null
         } catch (e: CancellationException) { throw e }
+        catch (e: app.iduanju.core.util.VerificationRequiredException) { verify = e; error = "需要验证" }
         catch (e: Exception) { error = e.message ?: "加载失败" }
         finally { loading = false }
     }
@@ -107,6 +109,7 @@ fun FeedGrid(key: String, cats: List<Pair<String, String>>, load: (String, Int) 
             Box(Modifier.fillMaxWidth().padding(20.dp), contentAlignment = Alignment.Center) {
                 when {
                     loading -> CircularProgressIndicator(color = c.secondary, strokeWidth = 2.dp, modifier = Modifier.size(22.dp))
+                    verify != null -> app.iduanju.huangguo.VerifyRequiredState(verify!!) { scope.launch { more() } }
                     error != null -> Text(error!! + " · 点击重试", color = c.secondary, fontSize = 13.sp, modifier = Modifier.clickable { scope.launch { more() } })
                     items.isEmpty() -> Text("该分类暂无内容，请尝试具体子分类", color = c.secondary, fontSize = 13.sp)
                 }

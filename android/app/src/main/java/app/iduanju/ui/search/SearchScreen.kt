@@ -67,6 +67,7 @@ fun SearchScreen(onOpenDetail: (String) -> Unit, initialQuery: String = "") {
     var hasMore by remember { mutableStateOf(false) }
     var loading by remember { mutableStateOf(false) }
     var err by remember { mutableStateOf<String?>(null) }
+    var verify by remember { mutableStateOf<app.iduanju.core.util.VerificationRequiredException?>(null) }
     // iOS SourceGate.searchSources: [红果, 黄果] + visible sites (黄果 only behind the adult gate on Android)
     val ia = IdjApp.instance
     val sources: List<Pair<String, String>> = remember(ia.cms.adultUnlocked) {
@@ -86,7 +87,7 @@ fun SearchScreen(onOpenDetail: (String) -> Unit, initialQuery: String = "") {
     fun loadMore(reset: Boolean) {
         if (loading) return
         val q = submitted; if (q.isEmpty()) return
-        loading = true; err = null
+        loading = true; err = null; verify = null
         scope.launch {
             try {
                 if (reset) pageNo = 1
@@ -105,7 +106,8 @@ fun SearchScreen(onOpenDetail: (String) -> Unit, initialQuery: String = "") {
                 val seen = items.map { it.seriesId }.toSet()
                 items.addAll(p.items.filter { it.seriesId !in seen })
                 cursor = p.nextCursor; hasMore = p.hasMore && p.items.isNotEmpty()
-            } catch (e: Exception) { err = e.message ?: "搜索失败" }
+            } catch (e: app.iduanju.core.util.VerificationRequiredException) { verify = e; err = "需要验证" }
+            catch (e: Exception) { err = e.message ?: "搜索失败" }
             loading = false
         }
     }
@@ -199,6 +201,7 @@ fun SearchScreen(onOpenDetail: (String) -> Unit, initialQuery: String = "") {
                     Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
                         when {
                             loading -> CircularProgressIndicator(color = c.secondary, strokeWidth = 2.dp, modifier = Modifier.size(22.dp))
+                            verify != null -> app.iduanju.huangguo.VerifyRequiredState(verify!!) { loadMore(items.isEmpty()) }
                             err != null -> Text("$err · 点击重试", color = c.secondary, fontSize = 13.sp, modifier = Modifier.clickable { loadMore(items.isEmpty()) })
                             items.isEmpty() -> Text("没有找到「$submitted」", color = c.secondary, fontSize = 14.sp)
                             !hasMore -> Text("没有更多了", color = c.secondary, fontSize = 12.sp)

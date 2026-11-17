@@ -4,6 +4,7 @@ import app.iduanju.core.hongguo.*
 import app.iduanju.core.util.ContentFilter
 import app.iduanju.core.util.ProviderException
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -76,7 +77,12 @@ data class HuangguoChannel(val sub: HuangguoSub, val slug: String, val title: St
  * legacy cloudfront app API (AES-CBC params/responses, guest login). Adult source: the app only shows it behind the adult gate.
  * IDs: series `huangguo:<sub>:<ref with / → ~>`, episode vid `<series id>:<episode key>`.
  */
-class HuangguoClient(private val dir: File? = null, private val prefs: MutableMap<String, String> = ConcurrentHashMap()) {
+/**
+ * [cfCookies] backs requests to the Cloudflare-protected 视频站 (issue #12): the app passes a jar over the WebView
+ * CookieManager, so the `cf_clearance` the user earns in the visible verify screen is reused (and persisted) here.
+ */
+class HuangguoClient(private val dir: File? = null, private val prefs: MutableMap<String, String> = ConcurrentHashMap(),
+                     private val cfCookies: okhttp3.CookieJar = okhttp3.CookieJar.NO_COOKIES) {
     companion object {
         const val UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Mobile/15E148 Safari/604.1"
         val aiMirrors = listOf("https://00b4b.adihsppe.cc", "https://bsl8m.adihsppe.cc", "https://hgai12.com", "https://brma.adihsppe.cc", "https://mzofzp.adihsppe.cc",
@@ -156,10 +162,28 @@ class HuangguoClient(private val dir: File? = null, private val prefs: MutableMa
         /** Non-consensual themes are excluded on top of the minors rule (ContentFilter). */
         val nonConsent = listOf("强奸", "強姦", "强暴", "強暴", "迷奸", "迷姦", "轮奸", "輪姦", "下药", "下藥", "迷药", "迷藥", "催眠", "胁迫", "脅迫", "强迫", "強迫", "被迫",
             "肉偿", "肉償", "凌辱", "侵犯", "猥亵", "猥褻", "非自愿", "囚禁", "绑架", "綁架", "偷拍", "盗摄", "醉奸", "睡奸", "性奴", "调教", "調教", "rape", "forced", "drugged", "hypno")
+        val cfHosts = listOf(java.net.URI(videoBase).host)
+        fun isCFHost(host: String?) = host != null && cfHosts.any { app.iduanju.core.util.CFDetect.domainMatches(it, host) }
+        const val cfUAKey = "stv.huangguo.cfUA"
+        /** Non-null for a Cloudflare interstitial; the verify target is the site root, where the user passes the check. */
+        fun challengeError(url: String, status: Int, header: (String) -> String?, body: String): app.iduanju.core.util.VerificationRequiredException? {
+            if (!app.iduanju.core.util.CFDetect.isChallenge(status, header, body)) return null
+            val u = java.net.URI(url)
+            return app.iduanju.core.util.VerificationRequiredException("${u.scheme ?: "https"}://${u.host}/", u.host ?: "")
+        }
         fun blocked(vararg texts: String?): Boolean { val t = texts.filterNotNull(); return ContentFilter.isBlocked(t) || t.any { s -> nonConsent.any { s.contains(it, ignoreCase = true) } } }
     }
 
-    private val http = OkHttpClient.Builder().callTimeout(20, TimeUnit.SECONDS).build()
+    private val http = OkHttpClient.Builder().callTimeout(20, TimeUnit.SECONDS).cookieJar(object : okhttp3.CookieJar {
+        // Only the challenged hosts share the WebView jar; mirrors / API hosts keep the old cookie-less behaviour.
+        override fun saveFromResponse(url: okhttp3.HttpUrl, cookies: List<okhttp3.Cookie>) { if (isCFHost(url.host)) cfCookies.saveFromResponse(url, cookies) }
+        override fun loadForRequest(url: okhttp3.HttpUrl): List<okhttp3.Cookie> = if (isCFHost(url.host)) cfCookies.loadForRequest(url) else emptyList()
+    }).build()
+
+    /** cf_clearance is bound to the WebView UA it was issued to, so challenged hosts must send that same UA. */
+    fun userAgent(url: String): String = if (isCFHost(runCatching { java.net.URI(url).host }.getOrNull())) prefs[cfUAKey]?.takeIf { it.isNotBlank() } ?: UA else UA
+    fun rememberVerifiedUA(ua: String) { if (ua.isNotBlank()) prefs[cfUAKey] = ua; cache.clear() }
+    fun clearVerification() { prefs.remove(cfUAKey); cache.clear() }
     private val probeHttp = OkHttpClient.Builder().callTimeout(8, TimeUnit.SECONDS).build()
     @Volatile private var aiBase: String? = prefs["stv.huangguo.aiBase"]?.takeIf { false }
     private val cache = ConcurrentHashMap<String, Pair<Long, String>>()
@@ -167,12 +191,14 @@ class HuangguoClient(private val dir: File? = null, private val prefs: MutableMa
 
     private fun fetch(url: String, referer: String, headers: Map<String, String> = emptyMap(), post: String? = null): String {
         fixture?.invoke(url)?.let { return it }
-        val b = Request.Builder().url(url).header("User-Agent", UA).header("Referer", referer).header("Accept-Language", "zh-CN,zh;q=0.9")
+        val b = Request.Builder().url(url).header("User-Agent", userAgent(url)).header("Referer", referer).header("Accept-Language", "zh-CN,zh;q=0.9")
         headers.forEach { (k, v) -> b.header(k, v) }
         if (post != null) b.post(post.toRequestBody("application/json".toMediaType()))
         http.newCall(b.build()).execute().use { r ->
+            val body = r.body?.string() ?: ""
+            if (isCFHost(r.request.url.host)) challengeError(url, r.code, { r.header(it) }, body)?.let { throw it }
             if (r.code !in 200..299) throw ProviderException.upstream("HTTP ${r.code}")
-            return r.body?.string() ?: ""
+            return body
         }
     }
     private fun text(url: String, referer: String, ttl: Long = 300): String {
@@ -271,6 +297,7 @@ class HuangguoClient(private val dir: File? = null, private val prefs: MutableMa
         val pool = Executors.newFixedThreadPool(jobs.size)
         val res = try { pool.invokeAll(jobs.map { j -> java.util.concurrent.Callable { runCatching(j) } }, 40, TimeUnit.SECONDS).map { runCatching { it.get() }.getOrElse { Result.failure(it) } } } finally { pool.shutdownNow() }
         val hits = res.flatMap { it.getOrDefault(emptyList()) }.filter { !blocked(it.title, it.subtitle, *it.tags.toTypedArray()) }.distinctBy { it.seriesId }
+        if (hits.isEmpty()) res.firstNotNullOfOrNull { it.exceptionOrNull() as? app.iduanju.core.util.VerificationRequiredException }?.let { throw it }
         if (hits.isEmpty() && res.all { it.isFailure }) res.firstNotNullOfOrNull { it.exceptionOrNull() }?.let { throw ProviderException.upstream(it.message ?: "黄果搜索失败") }
         return hits
     }
@@ -334,7 +361,14 @@ class HuangguoClient(private val dir: File? = null, private val prefs: MutableMa
                 if (pb != null) { referer = ep.page ?: "$base/video/$ref/"; headers["Origin"] = base; headers.putAll(pb.cdn); media = pb.main }
                 else if (ep.page != null) { val h = text(ep.page, referer, 30); if (media.isEmpty()) media = aiVideoURL(h, ep.page); headers.putAll(aiCDNHeaders(h, base)) }
             }
-            HuangguoSub.video -> { referer = "$videoBase/"; if (media.isEmpty() && ep.page != null) media = dataHLS(text(ep.page, referer, 30), ep.page) ?: "" }
+            HuangguoSub.video -> {
+                referer = "$videoBase/"; headers["User-Agent"] = userAgent(videoBase)
+                if (media.isEmpty() && ep.page != null) media = dataHLS(text(ep.page, referer, 30), ep.page) ?: ""
+                // Same clearance for playlist / segments served from the challenged host (never sent to other CDNs).
+                media.toHttpUrlOrNull()?.takeIf { isCFHost(it.host) }?.let { u ->
+                    cfCookies.loadForRequest(u).takeIf { it.isNotEmpty() }?.let { cs -> headers["Cookie"] = cs.joinToString("; ") { "${it.name}=${it.value}" } }
+                }
+            }
             HuangguoSub.legacy -> {
                 val a = legacyAccess(); val base = apiBase(); referer = "$frontendURL/"
                 media = "$base/api/app/vid/h5/m3u8/${media.trimStart('/')}?token=${queryEscape(a.token)}&c=${queryEscape(cdnURL)}"
