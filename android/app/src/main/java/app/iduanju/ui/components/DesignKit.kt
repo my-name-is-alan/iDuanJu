@@ -170,7 +170,8 @@ fun Hairline(modifier: Modifier = Modifier) = Box(modifier.fillMaxWidth().height
 fun Modifier.pressClick(scale: Float = 0.96f, enabled: Boolean = true, label: String? = null, onClick: () -> Unit): Modifier = composed {
     val src = remember { MutableInteractionSource() }
     val pressed by src.collectIsPressedAsState()
-    val s by animateFloatAsState(if (pressed) scale else 1f, DS.press(), label = "press")
+    // Expressive spatial spring: dips fast and settles back with a tiny overshoot.
+    val s by animateFloatAsState(if (pressed) scale else 1f, ExpressiveMotion.spatialFast(), label = "press")
     this.graphicsLayer { scaleX = s; scaleY = s; alpha = if (pressed) 0.85f else 1f }
         .clickable(src, null, enabled = enabled, onClick = onClick)
         .then(if (label != null) Modifier.semantics { contentDescription = label } else Modifier)
@@ -250,7 +251,8 @@ fun <T> SegmentedTabs(items: List<T>, selected: T, label: (T) -> String, onSelec
             items.forEachIndexed { i, it ->
                 val on = i == idx
                 val col by animateColorAsState(if (on) c.text else c.secondary, label = "segc")
-                Box(Modifier.weight(1f).fillMaxHeight().clickable(remember { MutableInteractionSource() }, null) { onSelect(it) }
+                val src = remember { MutableInteractionSource() }
+                Box(Modifier.weight(1f).fillMaxHeight().expressivePress(0.94f, src).clickable(src, null) { onSelect(it) }
                     .semantics { contentDescription = "seg.${label(it)}" }, contentAlignment = Alignment.Center) {
                     Text(label(it), color = col, fontSize = 14.sp, fontWeight = if (on) FontWeight.SemiBold else FontWeight.Medium, maxLines = 1)
                 }
@@ -343,8 +345,10 @@ private val PlayGradient = Brush.linearGradient(listOf(Color(0xFF4A90FF), Color(
 /** `.btn`: 48 dp accent / ink / white / play capsule (32 dp small). */
 @Composable
 fun PillButton(title: String, modifier: Modifier = Modifier, icon: ImageVector? = null, tone: PillTone = PillTone.Accent, small: Boolean = false,
-               height: Dp? = null, enabled: Boolean = true, onClick: () -> Unit) {
+               height: Dp? = null, enabled: Boolean = true, pressScale: Float = 0.96f, onClick: () -> Unit) {
     val c = IdjThemeColors
+    val src = remember { MutableInteractionSource() }
+    val pressed by src.collectIsPressedAsState()
     val bg = when (tone) { PillTone.Accent -> c.accent; PillTone.Ink -> c.text; PillTone.White -> Color.White; PillTone.Play -> Color(0xFF3577F5) }
     val fg = when (tone) { PillTone.Accent -> c.onAccent; PillTone.Ink -> c.bg; PillTone.White -> Color(0xFF111317); PillTone.Play -> Color.White }
     val fill = if (tone == PillTone.Play) Modifier
@@ -353,7 +357,10 @@ fun PillButton(title: String, modifier: Modifier = Modifier, icon: ImageVector? 
         // crisp glass rim: bright on top, fading out toward the bottom
         .border(1.dp, Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.32f), Color.White.copy(alpha = 0.04f))), CircleShape)
     else Modifier.clip(CircleShape).background(bg)
-    Row(modifier.height(height ?: if (small) 32.dp else 48.dp).then(fill).pressClick(0.98f, enabled, title, onClick)
+    // The whole capsule (fill included) dips on the expressive spring, not just its label.
+    Row(modifier.expressivePress(pressScale, src, enabled).height(height ?: if (small) 32.dp else 48.dp).then(fill)
+        .graphicsLayer { alpha = if (pressed && enabled) 0.9f else 1f }
+        .clickable(src, null, enabled = enabled, onClick = onClick).semantics { contentDescription = title }
         .padding(horizontal = if (small) 14.dp else 22.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)) {
         if (icon != null) Icon(icon, null, Modifier.size(if (small) 14.dp else 18.dp), tint = fg)

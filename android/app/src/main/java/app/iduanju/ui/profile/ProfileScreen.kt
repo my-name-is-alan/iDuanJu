@@ -8,8 +8,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
@@ -24,6 +22,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.iduanju.IdjApp
 import app.iduanju.ui.LocalNavigate
+import app.iduanju.ui.components.ExpressiveSlider
+import app.iduanju.ui.components.ExpressiveStatusPill
+import app.iduanju.ui.components.LocalLayoutMetrics
+import app.iduanju.ui.components.expressivePress
 import app.iduanju.ui.theme.IdjThemeColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -48,6 +50,7 @@ fun ProfileScreen(onOpenDetail: (String) -> Unit = {}) {
 
     LaunchedEffect(Unit) { ia.hgWebAccount.refreshProfile() }
 
+    Box(Modifier.fillMaxSize()) {
     Column(
         Modifier.fillMaxSize().background(c.bg).statusBarsPadding().verticalScroll(rememberScrollState())
             .padding(vertical = 12.dp).padding(bottom = 100.dp),
@@ -66,7 +69,7 @@ fun ProfileScreen(onOpenDetail: (String) -> Unit = {}) {
                 favs.chunked(3).forEach { row ->
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         row.forEach { (sid, v) ->
-                            Column(Modifier.weight(1f).clickable { onOpenDetail(sid) }, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Column(Modifier.weight(1f).expressivePress(0.97f).clickable { onOpenDetail(sid) }, verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 Box(Modifier.fillMaxWidth().aspectRatio(0.75f).clip(RoundedCornerShape(10.dp)).background(c.elevated)) {
                                     coil.compose.AsyncImage(v.second, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                                 }
@@ -85,7 +88,7 @@ fun ProfileScreen(onOpenDetail: (String) -> Unit = {}) {
                     LinkRow("登录红果账号", ProfileIcons.key, sub = "使用红果 App 扫码登录，看剧进度同步到红果", trailing = "去登录") { go("hongguo-login") }
                 } else {
                     Row(
-                        Modifier.fillMaxWidth().clickable { confirmLogout = true }.padding(horizontal = 14.dp, vertical = 14.dp),
+                        Modifier.fillMaxWidth().expressivePress(0.97f).clickable { confirmLogout = true }.padding(horizontal = 14.dp, vertical = 14.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Box(
@@ -132,6 +135,7 @@ fun ProfileScreen(onOpenDetail: (String) -> Unit = {}) {
                         selected = app.iduanju.ui.components.GlassStylePref.style,
                         label = { it.label },
                         onSelect = { app.iduanju.ui.components.GlassStylePref.update(it) },
+                        modifier = Modifier.expressivePress(0.97f),
                     )
                     if (app.iduanju.ui.components.GlassStylePref.style == app.iduanju.ui.components.GlassStyle.LIQUID) {
                         val strength = app.iduanju.ui.components.GlassStylePref.strength
@@ -139,11 +143,10 @@ fun ProfileScreen(onOpenDetail: (String) -> Unit = {}) {
                             Text("通透度", color = c.text, fontSize = 15.sp, modifier = Modifier.weight(1f))
                             Text("${(strength * 100).roundToInt()}%", color = c.secondary, fontSize = 13.sp)
                         }
-                        Slider(
+                        ExpressiveSlider(
                             value = strength,
                             onValueChange = { app.iduanju.ui.components.GlassStylePref.updateStrength(it) },
                             valueRange = 0f..1f,
-                            colors = SliderDefaults.colors(thumbColor = c.accent, activeTrackColor = c.accent, inactiveTrackColor = c.text.copy(alpha = 0.12f)),
                             modifier = Modifier.fillMaxWidth().testTag("profile.glass.strength"),
                         )
                     }
@@ -172,9 +175,18 @@ fun ProfileScreen(onOpenDetail: (String) -> Unit = {}) {
                 ActRow("清空播放缓存", ProfileIcons.trash, scope, { message = it }) { withContext(Dispatchers.IO) { java.io.File(ctx.cacheDir, "hg-play").deleteRecursively() }; "播放缓存已清空" }
             }
             val ver = remember { runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull() ?: "" }
-            Text(message ?: "所有数据由本机直连上游，观看记录和收藏只保存在本机。\ni短剧 $ver",
-                color = if (message != null) c.accent else c.secondary, fontSize = 12.sp, lineHeight = 18.sp)
+            Text("所有数据由本机直连上游，观看记录和收藏只保存在本机。\ni短剧 $ver",
+                color = c.secondary, fontSize = 12.sp, lineHeight = 18.sp)
         }
+    }
+    // Transient status (cache cleared / update check / logout) floats above the bottom dock.
+    val railLayout = LocalLayoutMetrics.current.useRail
+    ExpressiveStatusPill(
+        message = message,
+        onDismiss = { message = null },
+        modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
+            .padding(horizontal = 24.dp).padding(bottom = if (railLayout) 24.dp else 84.dp),
+    )
     }
 
     if (confirmLogout) {
