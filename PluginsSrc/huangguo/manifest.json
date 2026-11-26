@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "id": "com.iduanju.huangguo",
+  "name": "黄果短剧",
+  "version": "1.1.0",
+  "author": { "name": "iDuanJu" },
+  "description": "黄果 AI 短剧：AI 站 + 视频站 + App 源三路子源，含成人内容，请确认已满 18 岁",
+  "type": "shortdrama",
+  "adult": true,
+  "language": ["zh"],
+  "minAppVersion": "1.5",
+  "entry": "main.js",
+  "permissions": {
+    "storage": true,
+    "cloudflare": true,
+    "http": [
+      "huangguoai.com", "huangguoai.io", "huangguoai.me", "huangguoai.ai",
+      "*.adihsppe.cc", "*.agdkczeyx.cc", "*.ediayikma.cc", "hgai12.com",
+      "huangguo.video", "*.cloudfront.net"
+    ],
+    "media": [
+      "*.tjyyjk.cn", "*.qnlycc.cn", "*.drleao.cn", "*.lkkwip.cn",
+      "huangguo.video", "*.cloudfront.net"
+    ]
+  },
+  "capabilities": ["home", "category", "search", "detail", "play"]
+}

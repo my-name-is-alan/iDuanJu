@@ -1,0 +1,23 @@
+{
+  "name": "iDuanJu 短剧插件（红果 / 黄果）",
+  "plugins": [
+    {
+      "id": "com.iduanju.hongguo",
+      "name": "红果短剧",
+      "manifest": "plugin-packages/hongguo.idjplugin",
+      "type": "shortdrama",
+      "adult": false,
+      "version": "1.1.0",
+      "description": "红果免费短剧：网页榜单调目录，App 签名通道取全集播放地址，官方弹幕"
+    },
+    {
+      "id": "com.iduanju.huangguo",
+      "name": "黄果短剧",
+      "manifest": "plugin-packages/huangguo.idjplugin",
+      "type": "shortdrama",
+      "adult": true,
+      "version": "1.1.0",
+      "description": "黄果 AI 站 + 视频站 + App 源三路子源（含成人内容）"
+    }
+  ]
+}

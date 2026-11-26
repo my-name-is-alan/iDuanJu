@@ -33,7 +33,6 @@ review_notes.*
 review_app
 review_app/
 
-# Local plugins & plugin sources (packaged locally, never committed)
-/PluginsSrc/
+# One-click importable plugin sources/bundles live on the `plugin` branch.
 /STV/Resources/Plugins/
 /local-plugins/
