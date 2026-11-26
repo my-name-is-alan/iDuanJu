@@ -7,6 +7,7 @@ struct PluginsView: View {
     @ObservedObject private var cms = CMSStore.shared
     @ObservedObject private var gate = SourceGate.shared
     @State private var pending: PendingInstall?
+    @State private var batch: BatchInstall?
     @State private var updates: [PendingInstall] = []
     @State private var busy: String?
     @State private var message: String?
@@ -93,6 +94,19 @@ struct PluginsView: View {
                 } catch { message = error.localizedDescription }
             }
         }
+        .sheet(item: $batch) { b in
+            PluginBatchConsentSheet(batch: b) { ok in
+                batch = nil
+                guard ok else { return }
+                var installed = 0
+                var failures = b.failed
+                for p in b.items {
+                    do { try store.commit(p); installed += 1 }
+                    catch { failures.append("\(p.manifest.name)：\(error.localizedDescription)") }
+                }
+                message = "已安装 \(installed) 个插件" + (failures.isEmpty ? "" : "；跳过 \(failures.count) 个：\(failures.joined(separator: "；"))")
+            }
+        }
         .dsDialog("插件网址", isPresented: $showURL, message: "支持 TVBox 配置、M3U、插件和订阅链接") {
             [.cancel(), .primary("下一步", disabled: { urlText.trimmingCharacters(in: .whitespaces).isEmpty }) { interpret(urlText) }]
         } extra: {
@@ -153,6 +167,22 @@ struct PluginsView: View {
             do { let p = try await Task.detached { try await work() }.value; pending = p }
             catch { message = error.localizedDescription }
             busy = nil
+        }
+    }
+
+    /// Downloads and validates every missing entry, then asks for consent once for the whole batch.
+    private func installAll(_ entries: [PluginSubscription.Entry], origin: String) {
+        busy = "prepare"; message = nil
+        Task {
+            var prepared: [PendingInstall] = []
+            var failures: [String] = []
+            for e in entries {
+                do { prepared.append(try await Task.detached { try await PluginInstaller.prepare(manifestURL: e.manifest, origin: origin) }.value) }
+                catch { failures.append("\(e.name)：\(error.localizedDescription)") }
+            }
+            busy = nil
+            if prepared.isEmpty { message = "全部安装失败：" + (failures.first ?? "未知错误"); return }
+            batch = BatchInstall(items: prepared, failed: failures)
         }
     }
 
@@ -230,6 +260,15 @@ struct PluginsView: View {
             }
             Text(s.error ?? s.url).dsFont(11, relativeTo: .caption2).foregroundStyle(s.error == nil ? STVTheme.secondary : STVTheme.accentWarm).lineLimit(1)
                 .padding(.leading, 44).padding(.top, -12)
+            let missing = s.plugins.filter { (!($0.adult ?? true) || gate.unlocked) && store.plugin($0.id) == nil }
+            if missing.count > 1 {
+                HStack {
+                    Spacer(minLength: 0)
+                    Button { installAll(missing, origin: "订阅：" + s.url) } label: { MiniButtonLabel(title: "全部安装（\(missing.count)）") }
+                        .buttonStyle(PressScale()).accessibilityIdentifier("plugins.sub.installAll")
+                }
+                .padding(.leading, 44)
+            }
             ForEach(s.plugins.filter { !($0.adult ?? true) || gate.unlocked }) { e in
                 HStack(spacing: 8) {
                     Text(e.name).dsFont(14, relativeTo: .subheadline).foregroundStyle(STVTheme.text)
@@ -392,6 +431,61 @@ struct PluginConsentSheet: View {
 
     private func capability(_ t: String, _ on: Bool) -> some View {
         line(t, on ? "checkmark.circle.fill" : "circle", on ? STVTheme.text : STVTheme.tertiary).dsRow()
+    }
+}
+
+/// One consent prompt for a subscription's "全部安装": every prepared plugin with its origin, signature
+/// state and allowed domains, then a single install action.
+private struct BatchInstall: Identifiable {
+    let id = UUID()
+    var items: [PendingInstall]
+    var failed: [String]
+}
+
+private struct PluginBatchConsentSheet: View {
+    let batch: BatchInstall
+    let done: (Bool) -> Void
+
+    var body: some View {
+        DSSheet("安装插件（\(batch.items.count) 个）", onClose: { done(false) }) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    ForEach(batch.items) { p in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 8) {
+                                Text(p.manifest.name).dsFont(16, .medium).foregroundStyle(STVTheme.text)
+                                if p.manifest.adult { DSStatus(text: "18+", tone: .warn) }
+                                Spacer(minLength: 0)
+                                Text("v\(p.manifest.version)").dsFont(12, relativeTo: .caption).foregroundStyle(STVTheme.secondary)
+                            }
+                            Text("\(p.manifest.type.label) · 作者 \(p.manifest.author.name) · 来源 \(p.origin)")
+                                .dsFont(12, relativeTo: .caption).foregroundStyle(STVTheme.secondary)
+                            Text(p.manifest.httpDomains.joined(separator: " · "))
+                                .dsFont(11, relativeTo: .caption2).foregroundStyle(STVTheme.tertiary).lineLimit(2)
+                            Text(p.signedBy == nil ? "未签名（无法确认作者身份）" : "已验证作者签名")
+                                .dsFont(11, relativeTo: .caption2).foregroundStyle(p.signedBy == nil ? STVTheme.accentWarm : STVTheme.ok)
+                        }
+                        .dsRow(vertical: 10)
+                    }
+                    if !batch.failed.isEmpty {
+                        Text("以下插件校验失败，将跳过：\n" + batch.failed.joined(separator: "\n"))
+                            .dsFont(12, relativeTo: .caption).foregroundStyle(STVTheme.accentWarm).padding(.horizontal, 20)
+                    }
+                    Text("每个插件只能访问上面列出的域名，运行在独立沙箱里：没有 eval、不能访问本机 / 局域网地址，也读不到其他插件的数据。")
+                        .dsFont(12, relativeTo: .caption).foregroundStyle(STVTheme.tertiary).lineSpacing(3).padding(.horizontal, 20)
+                }
+                .padding(.bottom, 20)
+            }
+        } footer: {
+            DSSheetFooter {
+                Button { done(false) } label: { PillButtonPlain(title: "取消") }
+                Button { done(true) } label: { PillButtonLabel(title: "全部安装", expand: true) }
+                    .accessibilityIdentifier("plugins.batch.consent.install")
+            }
+            .buttonStyle(PressScale(scale: 0.98))
+        }
+        .accessibilityElement(children: .contain)
+        .dsSheetChrome([.large])
     }
 }
 

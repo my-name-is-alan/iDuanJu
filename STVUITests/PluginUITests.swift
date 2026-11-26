@@ -99,6 +99,34 @@ final class PluginUITests: XCTestCase {
         XCTAssertTrue(text("已安装 示例漫画（演示） 1.1.0").waitForExistence(timeout: 10))
     }
 
+    /// Real network: set STV_SUB_URL to an idj1 subscription list to run; skipped otherwise.
+    /// Adds the subscription, taps 全部安装, approves one batch consent sheet and checks every entry landed.
+    func testSubscriptionInstallAll() throws {
+        guard let sub = ProcessInfo.processInfo.environment["STV_SUB_URL"], sub.hasPrefix("https://") else {
+            throw XCTSkip("set STV_SUB_URL to a subscription list")
+        }
+        launch(["STV_ROUTE": "plugins", "STV_PLUGINS_RESET": "1", "STV_SOURCES": "jable"])
+        tap(el("plugins.sub.add"))
+        let field = app.textFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap(); field.typeText(sub)
+        tap(app.buttons["添加"])
+        let bulk = el("plugins.sub.installAll")
+        XCTAssertTrue(bulk.waitForExistence(timeout: 60), "订阅加载后出现全部安装")
+        for _ in 0..<6 where !bulk.isHittable { app.swipeUp() }
+        XCTAssertTrue(bulk.isHittable)
+        bulk.tap()
+        shot("11-batch-prepare")
+        if !el("plugins.batch.consent.install").waitForExistence(timeout: 180) { shot("11-batch-prepare-stuck") }
+        let install = el("plugins.batch.consent.install")
+        XCTAssertTrue(install.exists, "批量同意页出现")
+        shot("12-batch-consent")
+        install.tap()
+        XCTAssertTrue(text("已安装 16 个插件").waitForExistence(timeout: 30))
+        shot("13-batch-installed")
+        XCTAssertTrue(text("已安装（16）").waitForExistence(timeout: 10), "16 个插件一次装好")
+    }
+
     func testPasteRejectsInvalidPlugin() {
         launch(["STV_ROUTE": "plugins"])
         tap(el("plugins.add.paste"))

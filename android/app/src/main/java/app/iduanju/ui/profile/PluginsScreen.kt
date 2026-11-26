@@ -179,6 +179,19 @@ fun PluginsScreen(onBack: () -> Unit) {
                                 }
                                 PlainIconButton(Icons.Outlined.Delete, "删除订阅", tint = c.danger, iconSize = 20.dp) { removing = "sub:${s.url}" to (s.name.ifEmpty { s.url }) }
                             }
+                            val missing = s.plugins.filter { e -> (e.adult != true || adult) && store.plugins.none { p -> p.id == e.id } }
+                            if (missing.size > 1) {
+                                Row(Modifier.fillMaxWidth().padding(end = 10.dp), horizontalArrangement = Arrangement.End) {
+                                    TextAction("全部安装（${missing.size}）", enabled = !busy) {
+                                        run {
+                                            var ok = 0
+                                            var failed = 0
+                                            for (e in missing) runCatching { store.interpret(e.manifest, "订阅：" + s.url) }.onSuccess { ok++ }.onFailure { failed++ }
+                                            "已安装 $ok 个插件" + if (failed > 0) "，失败 $failed 个" else ""
+                                        }
+                                    }
+                                }
+                            }
                             Column(Modifier.padding(end = 10.dp)) {
                                 s.plugins.filter { it.adult != true || adult }.forEach { e ->
                                     val inst = store.plugins.firstOrNull { it.id == e.id }
