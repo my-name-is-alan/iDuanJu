@@ -107,7 +107,43 @@ class PluginVideo(val inst: PluginInstance, private val extraDomains: List<Strin
             HGStream("p$i", PluginOut.s(st.opt("name"), 40).ifEmpty { host }, u, key = key, kind = kind, headers = h)
         }
         val first = streams.firstOrNull() ?: throw ProviderException.upstream("插件没有返回可播放的地址（需 https 且在 media 白名单内）")
-        return HGResolvedVideo(ep.vid, first.url, streams = streams, expiresAt = o.optLong("expiresAt"))
+        return HGResolvedVideo(ep.vid, first.url, streams = streams, expiresAt = o.optLong("expiresAt"),
+            danmaku = PluginOut.url(o.opt("danmaku")).ifEmpty { null })
+    }
+
+    /** Official comments through the plugin's `danmaku` export (episodeKey/from/to, docs/plugins/SPEC_ZH.md). Blocking. */
+    fun danmaku(episodeVid: String): HGDanmakuResult {
+        if ("danmaku" !in m.capabilities) return HGDanmakuResult(emptyList(), error = "当前片源不支持弹幕")
+        val (_, sidRaw, eid) = parseEp(episodeVid) ?: return HGDanmakuResult(emptyList(), error = "插件剧集 id 无效")
+        val o = try {
+            inst.call("danmaku", JSONObject().put("episodeKey", eid).put("seriesId", sidRaw).put("from", 0).put("to", 0), 27.0) as? JSONObject ?: JSONObject()
+        } catch (e: PluginException) {
+            return HGDanmakuResult(emptyList(), error = e.friendly)
+        }
+        val items = ArrayList<HGDanmaku>()
+        val seen = HashSet<String>()
+        val arr = o.optJSONArray("items") ?: JSONArray()
+        for (i in 0 until minOf(arr.length(), 3000)) {
+            val row = arr.optJSONObject(i) ?: continue
+            val text = PluginOut.s(row.opt("text"), 200)
+            if (text.isEmpty() || text.length > 200) continue
+            val time = when (val t = row.opt("time")) {
+                is Number -> t.toDouble()
+                is String -> t.toDoubleOrNull() ?: Double.NaN
+                else -> Double.NaN
+            }
+            if (!time.isFinite() || time < 0 || time > 604_800) continue
+            val color = PluginOut.s(row.opt("color"), 7).let { if (Regex("^#[0-9A-Fa-f]{6}$").matches(it)) it.uppercase() else "#FFFFFF" }
+            val mode = when (PluginOut.s(row.opt("mode"), 10).lowercase()) {
+                "top" -> HGDanmaku.Mode.top
+                "bottom" -> HGDanmaku.Mode.bottom
+                else -> HGDanmaku.Mode.scroll
+            }
+            if (!seen.add(String.format("%.3f|", time) + text)) continue
+            items.add(HGDanmaku(time, text, row.optInt("likes", 0).coerceAtLeast(0), color, mode))
+        }
+        items.sortBy { it.time }
+        return HGDanmakuResult(items, truncated = o.optBoolean("truncated"))
     }
 
     companion object {

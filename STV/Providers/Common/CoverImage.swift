@@ -23,7 +23,7 @@ enum CoverCrypto {
 
     static func kind(for url: String) -> CoverKind {
         let l = url.lowercased()
-        if l.contains("pic.drleao.cn") || l.contains("drleao.") { return .aiAES }
+        if l.contains("pic.drleao.cn") || l.contains("drleao.") || l.contains("qnlycc.") { return .aiAES }
         if l.contains("lkkwip.cn") || l.contains("/cf") && l.contains("/image/") { return .legacyXOR }
         // Relative legacy paths are absolutized before fetch; treat bare cf* as XOR.
         if url.hasPrefix("cf") || url.hasPrefix("hc") { return .legacyXOR }

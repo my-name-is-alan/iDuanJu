@@ -384,7 +384,9 @@ struct JSVideoProvider: SiteProvider {
                                     kind: (!key.isEmpty || fmt == "cenc") ? .mp4Cenc : (fmt == "hls" ? .hls : .mp4Clear), headers: h))
         }
         guard let first = streams.first else { throw ProviderError.upstream("插件没有返回可播放的地址（需 https 且在 media 白名单内）") }
-        return HGResolvedVideo(vid: ep.vid, url: first.url, key: nil, duration: nil, expiresAt: (o["expiresAt"] as? Int), err: nil, streams: streams)
+        let danmaku = PluginOut.url(o["danmaku"])
+        return HGResolvedVideo(vid: ep.vid, url: first.url, key: nil, duration: nil, expiresAt: (o["expiresAt"] as? Int), err: nil, streams: streams,
+                               danmaku: danmaku.isEmpty ? nil : danmaku)
     }
 }
 

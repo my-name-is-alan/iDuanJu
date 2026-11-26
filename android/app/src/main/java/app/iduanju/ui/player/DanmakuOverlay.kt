@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.sp
 import androidx.media3.common.Player
 import app.iduanju.IdjApp
 import app.iduanju.core.hongguo.*
+import app.iduanju.core.plugin.PluginVideo
 import app.iduanju.ui.components.DS
 import app.iduanju.ui.components.GlassStyle
 import app.iduanju.ui.components.GlassStylePref
@@ -296,12 +297,18 @@ fun DanmakuOverlay(
 ) {
     var raw by remember(vid) { mutableStateOf<List<HGDanmaku>>(emptyList()) }
     LaunchedEffect(seriesId, vid, externalUrl) {
-        if (vid.isEmpty() || (externalUrl == null && !seriesId.all { it.isDigit() })) {
+        if (vid.isEmpty() || (externalUrl == null && !seriesId.all { it.isDigit() } && !PluginVideo.isPlugin(seriesId))) {
             raw = emptyList()
             return@LaunchedEffect
         }
         onStatus("弹幕加载中…")
-        val r = withContext(Dispatchers.IO) { if (externalUrl != null) ExternalDanmaku.fetch(externalUrl, externalLan) else DanmakuPrefs.client.fetch(seriesId, vid) }
+        val r = withContext(Dispatchers.IO) {
+            when {
+                externalUrl != null -> ExternalDanmaku.fetch(externalUrl, externalLan)
+                PluginVideo.isPlugin(seriesId) -> PluginDanmaku.fetch(seriesId, vid)
+                else -> DanmakuPrefs.client.fetch(seriesId, vid)
+            }
+        }
         raw = r.items
         onStatus(if (r.items.isEmpty()) r.notice else r.notice.ifEmpty { "本集 ${r.items.size} 条" })
     }

@@ -13,7 +13,7 @@ object CoverCrypto {
 
     fun kind(url: String): Kind {
         val l = url.lowercase()
-        if (l.contains("pic.drleao.cn") || l.contains("drleao.")) return Kind.aiAES
+        if (l.contains("pic.drleao.cn") || l.contains("drleao.") || l.contains("qnlycc.")) return Kind.aiAES
         if (l.contains("lkkwip.cn") || (l.contains("/cf") && l.contains("/image/"))) return Kind.legacyXOR
         if (url.startsWith("cf") || url.startsWith("hc")) return Kind.legacyXOR
         return Kind.plain

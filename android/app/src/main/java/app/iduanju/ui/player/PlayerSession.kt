@@ -108,7 +108,7 @@ class PlayerSession internal constructor(
     /** Official 红果 comments, or the address a TVBox source delivered with the stream. */
     var danmakuUrl by mutableStateOf<String?>(null)
         private set
-    val danmakuCapable: Boolean get() = seriesId.all { it.isDigit() } || danmakuUrl != null
+    val danmakuCapable: Boolean get() = seriesId.all { it.isDigit() } || danmakuUrl != null || PluginDanmaku.capable(seriesId)
 
     var streams by mutableStateOf<List<HGStream>>(emptyList())
         private set

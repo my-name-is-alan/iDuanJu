@@ -300,6 +300,8 @@ struct DanmakuOverlay: View {
     let vid: String
     /// 弹幕 file delivered by the source (TVBox); nil = 红果 comments.
     var source: String? = nil
+    /// Plugin that owns this series; its `danmaku` export is asked for comments.
+    var pluginID: String? = nil
     var landscape = false
     /// Screen-space y of lane 0 (the overlay itself covers the whole screen).
     var laneTop: CGFloat = 96
@@ -378,6 +380,10 @@ struct DanmakuOverlay: View {
         if let source {
             settings.status = "弹幕加载中…"
             r = await DanmakuFile.fetch(source, lan: co.streamLan)
+        } else if let pluginID, !pluginID.isEmpty {
+            guard !vid.isEmpty, !seriesId.isEmpty else { return }
+            settings.status = "弹幕加载中…"
+            r = await PluginDanmaku.fetch(pluginID: pluginID, seriesId: seriesId, vid: vid)
         } else {
             guard !vid.isEmpty, seriesId.allSatisfy(\.isNumber) else { return }
             settings.status = "弹幕加载中…"
@@ -476,6 +482,42 @@ struct DanmakuOverlay: View {
     }
 }
 
+/// Comments from an idj1 plugin's `danmaku` export (红果 official comments live behind it).
+enum PluginDanmaku {
+    static func fetch(pluginID: String, seriesId: String, vid: String) async -> HGDanmakuResult {
+        guard PluginStore.snapshot(pluginID)?.manifest.capabilities.contains("danmaku") == true else {
+            return HGDanmakuResult(items: [], error: "当前片源不支持弹幕")
+        }
+        do {
+            let o = try await PluginRuntime.call(pluginID, "danmaku", ["episodeKey": vid, "seriesId": seriesId, "from": 0, "to": 0]) as? [String: Any] ?? [:]
+            var items: [HGDanmaku] = []
+            var seen = Set<String>()
+            for row in ((o["items"] as? [[String: Any]]) ?? []).prefix(3000) {
+                let text = PluginOut.s(row["text"], max: 200)
+                guard !text.isEmpty, text.count <= 200 else { continue }
+                let time: Double
+                if let n = row["time"] as? NSNumber { time = n.doubleValue }
+                else if let s = row["time"] as? String, let d = Double(s) { time = d }
+                else { continue }
+                guard time.isFinite, time >= 0, time <= 604_800 else { continue }
+                let color = PluginOut.s(row["color"], max: 7)
+                let hex = color.range(of: "^#[0-9A-Fa-f]{6}$", options: .regularExpression) != nil ? color.uppercased() : "#FFFFFF"
+                let modeName = PluginOut.s(row["mode"], max: 10).lowercased()
+                let mode: HGDanmaku.Mode = modeName == "top" ? .top : (modeName == "bottom" ? .bottom : .scroll)
+                let likes = max(0, (row["likes"] as? NSNumber)?.intValue ?? 0)
+                let key = String(format: "%.3f|", time) + text
+                guard seen.insert(key).inserted else { continue }
+                items.append(HGDanmaku(time: time, text: text, likes: likes, color: hex, mode: mode))
+            }
+            items.sort { $0.time < $1.time }
+            return HGDanmakuResult(items: items, truncated: o["truncated"] as? Bool ?? false)
+        } catch {
+            let message = (error as? PluginError)?.errorDescription ?? error.localizedDescription
+            return HGDanmakuResult(items: [], error: "弹幕加载失败：\(message)")
+        }
+    }
+}
+
 extension Color {
     init?(hex: String) {
         var s = hex; if s.hasPrefix("#") { s.removeFirst() }
@@ -532,7 +574,7 @@ struct DanmakuSettingsSheet: View {
             }
 
             if !available {
-                Text("当前片源不支持弹幕（仅红果）")
+                Text("当前片源不支持弹幕")
                     .font(.footnote)
                     .foregroundStyle(.white.opacity(0.6))
             }
