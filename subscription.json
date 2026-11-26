@@ -1,5 +1,5 @@
 {
-  "name": "iDuanJu 短剧插件（红果 / 黄果）",
+  "name": "iDuanJu 插件合集（红果 · 黄果 · 视频站 · 漫画）",
   "plugins": [
     {
       "id": "com.iduanju.hongguo",
@@ -18,6 +18,132 @@
       "adult": true,
       "version": "1.1.0",
       "description": "黄果 AI 站 + 视频站 + App 源三路子源（含成人内容）"
+    },
+    {
+      "id": "com.idj.bundled.91porn",
+      "name": "91Porn",
+      "manifest": "plugin-packages/91porn.idjplugin",
+      "type": "video",
+      "adult": true,
+      "version": "1.0.9",
+      "description": "91Porn 视频列表、分类、搜索、详情与播放地址解析。"
+    },
+    {
+      "id": "com.idj.bundled.eporner",
+      "name": "Eporner",
+      "manifest": "plugin-packages/eporner.idjplugin",
+      "type": "video",
+      "adult": true,
+      "version": "1.0.0",
+      "description": "Eporner · 官方公开 API · HLS + MP4 多画质"
+    },
+    {
+      "id": "com.idj.bundled.hanime1",
+      "name": "Hanime1",
+      "manifest": "plugin-packages/hanime1.idjplugin",
+      "type": "video",
+      "adult": true,
+      "version": "1.0.0",
+      "description": "Hanime1.me · 里番 / 泡面番 / 3DCG（MP4 直链，常需 Cloudflare 验证）"
+    },
+    {
+      "id": "com.idj.bundled.hqporner",
+      "name": "HQPorner",
+      "manifest": "plugin-packages/hqporner.idjplugin",
+      "type": "video",
+      "adult": true,
+      "version": "1.0.0",
+      "description": "HQPorner · MP4 多画质（mydaddy.cc 嵌入页，需代理）"
+    },
+    {
+      "id": "com.idj.bundled.jable",
+      "name": "Jable",
+      "manifest": "plugin-packages/jable.idjplugin",
+      "type": "video",
+      "adult": true,
+      "version": "1.0.0",
+      "description": "Jable.TV · HLS 直连（镜像 jable.tv / fs1.app）"
+    },
+    {
+      "id": "com.idj.bundled.missav",
+      "name": "MissAV",
+      "manifest": "plugin-packages/missav.idjplugin",
+      "type": "video",
+      "adult": true,
+      "version": "1.0.0",
+      "description": "MissAV · HLS 1080P/720P/480P（5 镜像自动探测，.fans/.media 免验证）"
+    },
+    {
+      "id": "com.idj.bundled.pornhub",
+      "name": "Pornhub",
+      "manifest": "plugin-packages/pornhub.idjplugin",
+      "type": "video",
+      "adult": true,
+      "version": "1.0.0",
+      "description": "Pornhub · HLS 1080P/720P/480P（需代理）"
+    },
+    {
+      "id": "com.idj.bundled.redtube",
+      "name": "RedTube",
+      "manifest": "plugin-packages/redtube.idjplugin",
+      "type": "video",
+      "adult": true,
+      "version": "1.0.0",
+      "description": "RedTube · HLS + MP4 多画质（需代理）"
+    },
+    {
+      "id": "com.idj.bundled.xnxx",
+      "name": "XNXX",
+      "manifest": "plugin-packages/xnxx.idjplugin",
+      "type": "video",
+      "adult": true,
+      "version": "1.0.0",
+      "description": "XNXX · HLS 自适应 + MP4（需代理）"
+    },
+    {
+      "id": "com.idj.bundled.xvideos",
+      "name": "XVideos",
+      "manifest": "plugin-packages/xvideos.idjplugin",
+      "type": "video",
+      "adult": true,
+      "version": "1.0.0",
+      "description": "XVideos · HLS 自适应 + MP4（需代理）"
+    },
+    {
+      "id": "com.idj.bundled.youporn",
+      "name": "YouPorn",
+      "manifest": "plugin-packages/youporn.idjplugin",
+      "type": "video",
+      "adult": true,
+      "version": "1.0.0",
+      "description": "YouPorn · HLS + MP4 多画质（需代理）"
+    },
+    {
+      "id": "com.idj.bundled.jm18comic",
+      "name": "18comic 禁漫",
+      "manifest": "plugin-packages/jm18comic.idjplugin",
+      "type": "comic",
+      "adult": true,
+      "version": "1.0.0",
+      "description": "18comic（禁漫天堂）中文成人漫画。自动轮换镜像（发布页 jmcomicgo.org），Cloudflare 在本插件独立的隐藏网页里验证，图片分段由 App 原生还原。"
+    },
+    {
+      "id": "com.idj.bundled.komikindo",
+      "name": "Komikindo",
+      "manifest": "plugin-packages/komikindo.idjplugin",
+      "type": "comic",
+      "adult": true,
+      "version": "1.0.0",
+      "description": "Komikindo（印尼语）成人漫画 / 同人 / 韩漫。图片需要 Referer，插件已处理。"
+    },
+    {
+      "id": "com.idj.bundled.manga18fx",
+      "name": "Manga18fx",
+      "manifest": "plugin-packages/manga18fx.idjplugin",
+      "type": "comic",
+      "adult": true,
+      "version": "1.0.0",
+      "description": "Manga18fx 英文成人韩漫（Manhwa）。不需要登录。"
     }
   ]
 }
