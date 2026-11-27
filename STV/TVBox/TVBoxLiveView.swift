@@ -40,18 +40,32 @@ struct LivePage: View {
     @ObservedObject var pane: LivePane
     let live: TVBoxLiveRef
     @ObservedObject private var store = TVBoxStore.shared
+    @Environment(\.layoutMetrics) private var layout
 
     var body: some View {
         let favorites = Set(store.favoriteChannels)
         let series = store.liveSeries(live)
+        let colCount = layout.isUltra ? 3 : (layout.tier != .compact ? 2 : 1)
         ScrollView {
-            LazyVStack(spacing: 0) {
-                ForEach(pane.shown) { r in
-                    LiveChannelRow(row: r, pane: pane, series: series, logo: live.live.logo, favorite: favorites.contains(r.channel.name))
+            if colCount > 1 {
+                let gridCols = Array(repeating: GridItem(.flexible(), spacing: 18, alignment: .top), count: colCount)
+                LazyVGrid(columns: gridCols, spacing: 2) {
+                    ForEach(pane.shown) { r in
+                        LiveChannelRow(row: r, pane: pane, series: series, logo: live.live.logo, favorite: favorites.contains(r.channel.name))
+                    }
                 }
+                .padding(.horizontal, layout.pagePadding - 16)
+                .padding(.top, 4).padding(.bottom, 24)
                 status
+            } else {
+                LazyVStack(spacing: 0) {
+                    ForEach(pane.shown) { r in
+                        LiveChannelRow(row: r, pane: pane, series: series, logo: live.live.logo, favorite: favorites.contains(r.channel.name))
+                    }
+                    status
+                }
+                .padding(.top, 4).padding(.bottom, 24)
             }
-            .padding(.top, 4).padding(.bottom, 24)
         }
         .scrollIndicators(.hidden)
         .scrollDismissesKeyboard(.immediately)

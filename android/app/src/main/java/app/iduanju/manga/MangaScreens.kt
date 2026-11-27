@@ -358,11 +358,17 @@ fun MangaReaderScreen(id: String, startIndex: Int, startPage: Int, onBack: () ->
                     } else GlassSpinner(color = Color.White)
                 }
             } else if (vertical) {
+                val mangaMax = LocalLayoutMetrics.current.mangaMaxWidth
                 val list = rememberLazyListState(initialFirstVisibleItemIndex = if (index == startIndex) startPage.coerceIn(0, pages.size - 1) else 0)
                 LaunchedEffect(list) { snapshotFlow { list.firstVisibleItemIndex }.collect { current = it.coerceAtMost(pages.size - 1) } }
-                LazyColumn(Modifier.fillMaxSize().clickable(interactionSource = null, indication = null) { chrome = !chrome }, state = list) {
-                    itemsIndexed(pages, key = { i, u -> "$i$u" }, contentType = { _, _ -> "page" }) { _, u -> PageImage(u, p.imageHeaders, ratios) }
-                    item(key = "end", contentType = "end") { ChapterEnd(d, index) { index = it } }
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+                    LazyColumn(
+                        Modifier.widthIn(max = mangaMax).fillMaxSize().clickable(interactionSource = null, indication = null) { chrome = !chrome },
+                        state = list,
+                    ) {
+                        itemsIndexed(pages, key = { i, u -> "$i$u" }, contentType = { _, _ -> "page" }) { _, u -> PageImage(u, p.imageHeaders, ratios) }
+                        item(key = "end", contentType = "end") { ChapterEnd(d, index) { index = it } }
+                    }
                 }
             } else {
                 val pager = rememberPagerState(if (index == startIndex) startPage.coerceIn(0, pages.size - 1) else 0) { pages.size + 1 }

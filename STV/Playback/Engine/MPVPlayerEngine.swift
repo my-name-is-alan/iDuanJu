@@ -506,6 +506,11 @@ final class MPVMetalView: UIView {
         _ = mpv_set_property_string(handle, "referrer", merged["Referer"] ?? "")
         _ = mpv_set_property_string(handle, "http-header-fields", Self.headerFields(merged))
         _ = mpv_set_property_string(handle, "start", (start ?? 0) > 0 ? String(format: "%.3f", start ?? 0) : "none")
+        _ = mpv_set_property_string(handle, "aid", "auto")
+        var vol: Double = 100
+        _ = mpv_set_property(handle, "volume", MPV_FORMAT_DOUBLE, &vol)
+        var muteFlag: Int32 = isMuted ? 1 : 0
+        _ = mpv_set_property(handle, "mute", MPV_FORMAT_FLAG, &muteFlag)
         _ = mpv_set_property_string(handle, "pause", "yes")
         if suspendedForBackground {
             suspendedForBackground = false

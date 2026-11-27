@@ -3,6 +3,7 @@ import SwiftUI
 /// 四个根页面 + 窄屏底部悬浮玻璃胶囊 / 平板宽屏左侧悬浮玻璃导航轨（系统 TabBar 隐藏）。
 /// 导航栏只在根页面显示；进入详情 / 播放器等二级页面时隐藏。
 struct RootTabView: View {
+    @Environment(\.colorScheme) private var colorScheme
     @State private var tab: Int
     @State private var mountedTabs: Set<Int>
     @State private var paths = [NavigationPath(), NavigationPath(), NavigationPath(), NavigationPath(), NavigationPath()]
@@ -20,29 +21,21 @@ struct RootTabView: View {
         GeometryReader { geo in
             let metrics = LayoutMetrics(width: geo.size.width, height: geo.size.height)
             let showNav = paths[tab].isEmpty
+            let showRail = showNav && metrics.useRail
             let showBottomBar = showNav && !metrics.useRail && !tabBarHidden
-            HStack(spacing: 0) {
-                // The spring belongs to the bars alone: attached to the whole tree (as it was) every push and pop animated
-                // the layout of all five tabs.
-                Group {
-                    if showNav && metrics.useRail {
-                        GlassNavigationRail(selection: $tab, items: Self.items) { i in
-                            if i == tab { paths[i] = NavigationPath() }
-                        }
-                        .transition(.move(edge: .leading).combined(with: .opacity))
-                    }
-                }
-                .animation(DS.select, value: showNav && metrics.useRail)
+            ZStack(alignment: .leading) {
                 // Deterministic lazy-mounted tab container: avoids UIKit TabView(.toolbar(.hidden)) selection
                 // desyncs on iOS 18/26 while keeping each visited tab's NavigationStack and scroll state alive.
                 ZStack {
-                    tabSlot(0, reserveBottomBar: !metrics.useRail) { HomeView() }
-                    tabSlot(1, reserveBottomBar: !metrics.useRail) { TVBoxHubView() }
-                    tabSlot(2, reserveBottomBar: !metrics.useRail) { CategoryView() }
-                    tabSlot(3, reserveBottomBar: !metrics.useRail) { ProfileView() }
-                    tabSlot(4, reserveBottomBar: !metrics.useRail) { SearchView() }
+                    let railInset: CGFloat = metrics.useRail ? metrics.railWidth : 0
+                    tabSlot(0, reserveBottomBar: !metrics.useRail, leadingRail: railInset) { HomeView() }
+                    tabSlot(1, reserveBottomBar: !metrics.useRail, leadingRail: railInset) { TVBoxHubView() }
+                    tabSlot(2, reserveBottomBar: !metrics.useRail, leadingRail: railInset) { CategoryView() }
+                    tabSlot(3, reserveBottomBar: !metrics.useRail, leadingRail: railInset) { ProfileView() }
+                    tabSlot(4, reserveBottomBar: !metrics.useRail, leadingRail: railInset) { SearchView() }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(STVTheme.bg.ignoresSafeArea())
                 .tint(STVTheme.accent)
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 8)
@@ -91,6 +84,18 @@ struct RootTabView: View {
                         tabBarHidden = false
                     }
                 }
+                .compatOnChange(of: colorScheme) { _ in
+                    StatusBarGate.shared.refreshAppearance()
+                }
+                Group {
+                    if showRail {
+                        GlassNavigationRail(selection: $tab, items: Self.items, searchTag: 4) { i in
+                            if i == tab { paths[i] = NavigationPath() }
+                        }
+                        .transition(.move(edge: .leading).combined(with: .opacity))
+                    }
+                }
+                .animation(DS.select, value: showRail)
             }
             .environment(\.layoutMetrics, metrics)
         }
@@ -105,10 +110,10 @@ struct RootTabView: View {
     }
 
     @ViewBuilder
-    private func tabSlot<V: View>(_ idx: Int, reserveBottomBar: Bool, @ViewBuilder content: () -> V) -> some View {
+    private func tabSlot<V: View>(_ idx: Int, reserveBottomBar: Bool, leadingRail: CGFloat, @ViewBuilder content: () -> V) -> some View {
         if mountedTabs.contains(idx) || tab == idx {
             let active = tab == idx
-            Stack(path: $paths[idx], reserveBottomBar: reserveBottomBar, content: content)
+            Stack(path: $paths[idx], reserveBottomBar: reserveBottomBar, leadingRail: leadingRail, content: content)
                 .opacity(active ? 1 : 0)
                 .zIndex(active ? 1 : 0)
                 .allowsHitTesting(active)
@@ -118,14 +123,19 @@ struct RootTabView: View {
 }
 
 private struct Stack<V: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
     @Binding var path: NavigationPath
     var reserveBottomBar: Bool = true
+    var leadingRail: CGFloat = 0
     @ViewBuilder var content: V
     @Namespace private var ns
     var body: some View {
         NavigationStack(path: $path) {
             content
+                .environment(\.railLeadingInset, leadingRail)
+                .padding(.leading, leadingRail)
                 .toolbar(.hidden, for: .tabBar)
+                .toolbarColorScheme(colorScheme, for: .navigationBar)
                 .safeAreaInset(edge: .bottom, spacing: 0) { Color.clear.frame(height: reserveBottomBar ? GlassTabBar.clearance : 0) }
                 .routes()
         }.environment(\.zoomNS, ns)
@@ -199,6 +209,7 @@ private struct NavBarItem: View {
 private struct NavSearchButton: View {
     let on: Bool
     let size: CGFloat
+    var accessibilityID: String = "tab.search"
     let action: () -> Void
     var body: some View {
         Button(action: action) {
@@ -211,12 +222,12 @@ private struct NavSearchButton: View {
         }
         .buttonStyle(PressScale(scale: 0.94))
         .accessibilityLabel("搜索")
-        .accessibilityIdentifier("tab.search")
+        .accessibilityIdentifier(accessibilityID)
         .accessibilityAddTraits(on ? .isSelected : [])
     }
 }
 
-/// Vertical floating glass navigation rail for Expanded iPad / Stage Manager widths (>= 840pt).
+/// Vertical floating 72pt Liquid Glass navigation rail for Expanded iPad / Stage Manager widths (>= 840pt).
 struct GlassNavigationRail: View {
     @Binding var selection: Int
     let items: [(String, String)]
@@ -227,23 +238,30 @@ struct GlassNavigationRail: View {
         LiquidGlassGroup(spacing: 12) {
             VStack(spacing: 12) {
                 if let searchTag {
-                    NavSearchButton(on: selection == searchTag, size: 56) { pick(searchTag) }
+                    NavSearchButton(on: selection == searchTag, size: 48, accessibilityID: "home.search") { pick(searchTag) }
                 }
+                Spacer(minLength: 8)
                 VStack(spacing: 6) {
                     ForEach(items.indices, id: \.self) { i in
-                        NavBarItem(title: items[i].0, symbol: items[i].1, on: i == selection, height: 56, ns: ns) { pick(i) }
+                        NavBarItem(title: items[i].0, symbol: items[i].1, on: i == selection, height: 52, ns: ns) { pick(i) }
                             .accessibilityIdentifier("tab.\(i)")
                     }
                 }
-                .padding(6)
-                .liquidGlass(corner: 34, interactive: true)
+                .frame(width: 56)
+                .padding(.vertical, 6)
+                .padding(.horizontal, 4)
+                .liquidGlass(corner: 30, interactive: true)
                 .animation(DS.select, value: selection)
-                Spacer()
+                Spacer(minLength: 8)
+                if searchTag != nil {
+                    Color.clear.frame(height: 48)
+                }
             }
         }
-        .frame(width: 84)
-        .padding(.vertical, 16)
-        .padding(.leading, 8)
+        .padding(.leading, 12)
+        .padding(.trailing, 4)
+        .frame(width: 72, alignment: .leading)
+        .padding(.vertical, 14)
     }
 
     private func pick(_ i: Int) {

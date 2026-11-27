@@ -368,6 +368,7 @@ struct MangaReaderView: View {
     @State private var visible: Set<Int> = []
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.layoutMetrics) private var layout
     /// Not observed: the reader writes progress here on every page, and nothing on screen reads it back.
     private var store: MangaStore { .shared }
     private var provider: MangaProvider { MangaFixtures.provider ?? item.source.provider }
@@ -402,8 +403,9 @@ struct MangaReaderView: View {
 
     private var verticalReader: some View {
         ScrollViewReader { proxy in
-            // Zoom = wider content (pages fit width × scale), so both axes scroll to every edge.
+            // Zoom = wider content (pages fit width × scale), centered at comfortable webtoon width on tablets.
             GeometryReader { geo in
+                let baseW = layout.mangaMaxWidth.map { min(geo.size.width, $0) } ?? geo.size.width
                 ScrollView(scale > 1.01 ? [.vertical, .horizontal] : .vertical) {
                     LazyVStack(spacing: 0) {
                         ForEach(pages.indices, id: \.self) { i in
@@ -416,7 +418,8 @@ struct MangaReaderView: View {
                         }
                         chapterEnd
                     }
-                    .frame(width: geo.size.width * scale)
+                    .frame(width: baseW * scale)
+                    .frame(minWidth: geo.size.width)
                 }
             }
             .gesture(MagnificationGesture().onChanged { scale = max(1, min(3, baseScale * $0)) }.onEnded { _ in baseScale = scale })

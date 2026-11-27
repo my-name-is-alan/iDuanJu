@@ -142,13 +142,31 @@ extension View {
     func dsBar(_ radius: CGFloat) -> some View { modifier(DSBarGround(radius: radius)) }
     /// Pinned header: content dissolves into the page colour under it (no hairline, no slab).
     func dsPinned(_ on: Bool) -> some View { background { LiquidEdgeFade(visible: on) } }
-    /// Page ground with the spec's top glow (`.phone.amb` / `.amb-cool`).
+    /// Page ground with the spec's top glow (`.phone.amb` / `.amb-cool`), bleeding seamlessly behind the Expanded rail.
     func dsAmbient(cool: Bool = false, visible: Bool = true) -> some View {
-        background(alignment: .top) {
-            AmbientGlow(cool: cool).opacity(visible ? 1 : 0).animation(.easeOut(duration: 0.25), value: visible)
-                .ignoresSafeArea().allowsHitTesting(false)
-        }
-        .background(STVTheme.bg.ignoresSafeArea())
+        modifier(DSAmbient(cool: cool, visible: visible))
+    }
+}
+
+private struct DSAmbient: ViewModifier {
+    let cool: Bool
+    let visible: Bool
+    @Environment(\.railLeadingInset) private var railInset
+    func body(content: Content) -> some View {
+        content
+            .background(alignment: .top) {
+                AmbientGlow(cool: cool)
+                    .opacity(visible ? 1 : 0)
+                    .animation(.easeOut(duration: 0.25), value: visible)
+                    .padding(.leading, -railInset)
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
+            .background {
+                STVTheme.bg
+                    .padding(.leading, -railInset)
+                    .ignoresSafeArea()
+            }
     }
 }
 
@@ -821,7 +839,7 @@ struct PosterArt: View {
             .aspectRatio(series.isLandscapeCover ? 16 / 9 : 3 / 4, contentMode: .fit)
             .overlay { CoverView(url: series.cover, corner: 0, maxPixelSize: series.isLandscapeCover ? CoverPixels.wide : CoverPixels.poster) }
             .overlay {
-                LinearGradient(stops: [.init(color: .clear, location: 0.46), .init(color: .black.opacity(0.62), location: 1)],
+                LinearGradient(stops: [.init(color: .clear, location: 0.44), .init(color: .black.opacity(0.74), location: 1)],
                                startPoint: .top, endPoint: .bottom).allowsHitTesting(false)
             }
             .overlay(alignment: .topLeading) { if let rank { PosterRankNumeral(rank: rank) } }
@@ -834,7 +852,9 @@ struct PosterArt: View {
             }
             .overlay(alignment: .bottomTrailing) {
                 if showEpisodes, let e = DS.episodes(series) {
-                    Text(e).font(.system(size: 11)).foregroundStyle(.white.opacity(0.9)).lineLimit(1)
+                    Text(e).font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.94))
+                        .shadow(color: .black.opacity(0.60), radius: 2, y: 1)
+                        .lineLimit(1)
                         .padding(.trailing, 8).padding(.bottom, 7)
                 }
             }

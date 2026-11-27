@@ -227,6 +227,9 @@ final class PlaybackCoordinator: NSObject, @preconcurrency AVPictureInPictureCon
     private var nextPrepared = false
     /// A seek in flight: ticks keep showing the target until the core gets there, so the knob never jumps back.
     private var seekHold: (target: Double, until: CFTimeInterval)?
+    /// Serialized seek loop so rapid scrubber taps coalesce cleanly instead of firing overlapping core seeks.
+    private var seekTask: Task<Void, Never>?
+    private var pendingSeekTarget: Double?
     private var pipIdentity: ObjectIdentifier?
     private var timer: Timer?
     private var sharedCommandsRegistered = false
@@ -277,6 +280,9 @@ final class PlaybackCoordinator: NSObject, @preconcurrency AVPictureInPictureCon
     @Published private var interrupted = false
     private var recoverInterruptedTransport = false
     private var audioSessionActive = false
+    /// Active coordinators currently owning the shared `AVAudioSession` so an exiting player's `onDisappear`
+    /// teardown cannot deactivate the session out from under a newly mounted player.
+    static var activeAudioOwners: Set<ObjectIdentifier> = []
     private var continuePiP = false
     private let suppliedEngine: PlayerEngine?
     private let sourceResolver: ((Int) async throws -> Source)?
@@ -354,6 +360,7 @@ final class PlaybackCoordinator: NSObject, @preconcurrency AVPictureInPictureCon
     }
 
     private func activateAudioSession() {
+        Self.activeAudioOwners.insert(ObjectIdentifier(self))
         guard !audioSessionActive else { return }
         do {
             let session = AVAudioSession.sharedInstance()
@@ -369,6 +376,9 @@ final class PlaybackCoordinator: NSObject, @preconcurrency AVPictureInPictureCon
         guard !teardownCompleted else { return }
         teardownCompleted = true
         activation = UUID()
+        seekTask?.cancel()
+        seekTask = nil
+        pendingSeekTarget = nil
         watchdog?.cancel()
         watchdog = nil
         sleepTimerTask?.cancel()
@@ -426,8 +436,11 @@ final class PlaybackCoordinator: NSObject, @preconcurrency AVPictureInPictureCon
         telemetry.prebuffer = nil
         externalSubtitles.clear()
         LibraryStore.shared.flush()
+        Self.activeAudioOwners.remove(ObjectIdentifier(self))
         if audioSessionActive {
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            if Self.activeAudioOwners.isEmpty {
+                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            }
             audioSessionActive = false
         }
     }
@@ -805,6 +818,9 @@ final class PlaybackCoordinator: NSObject, @preconcurrency AVPictureInPictureCon
         save(force: true)
         let token = UUID()
         activation = token
+        seekTask?.cancel()
+        seekTask = nil
+        pendingSeekTarget = nil
         watchdog?.cancel()
         started = false
         steady = 0
@@ -857,6 +873,9 @@ final class PlaybackCoordinator: NSObject, @preconcurrency AVPictureInPictureCon
                 if series.source.isDynamic { armWatchdog(i, src: src, token: token) }
                 let container = await self.container(of: src, stream: chosen[i])
                 guard activation == token else { return }
+                // Activate the playback audio session BEFORE initializing MPV (`ao=audiounit`) or loading/seeking
+                // an AVPlayerItem at `start > 0` (e.g. resuming from Favorites/History) so audio routing is live.
+                activateAudioSession()
                 let next = chooseEngine(i, src, container)
                 switchEngine(to: next)
                 audioOptions = []; subtitleOptions = []; audioSelected = nil; subtitleSelected = nil
@@ -1521,11 +1540,36 @@ final class PlaybackCoordinator: NSObject, @preconcurrency AVPictureInPictureCon
 
     func seek(fraction: Double) {
         guard duration > 0, !isLive else { return }
-        let target = duration * fraction
+        let target = max(0, min(duration, duration * fraction))
         clock.update { $0.time = target }
         seekHold = (target, CACurrentMediaTime() + 2.5)
-        Task { await engine.seek(to: target) }
+        enqueueSeek(to: target)
         updatePrefetch(at: target, force: true)
+    }
+
+    /// Coalesces rapid scrubber taps so at most one engine seek is in flight at a time, preventing
+    /// CoreMedia / AudioUnit audio-renderer drops caused by overlapping cancelled seeks.
+    private func enqueueSeek(to target: Double) {
+        pendingSeekTarget = target
+        guard seekTask == nil else { return }
+        let token = activation
+        seekTask = Task { @MainActor [weak self] in
+            defer { self?.seekTask = nil }
+            while let self, let nextTarget = self.pendingSeekTarget {
+                self.pendingSeekTarget = nil
+                guard self.activation == token, self.readyIndex != nil else { return }
+                let eng = self.engine
+                await eng.seek(to: nextTarget)
+                guard !Task.isCancelled, self.activation == token, self.engine === eng else { return }
+                if self.pendingSeekTarget == nil, self.wantsPlayback, !self.interrupted {
+                    self.activateAudioSession()
+                    eng.muted = self.muted
+                    if eng.isPaused && !eng.isWaiting {
+                        self.play()
+                    }
+                }
+            }
+        }
     }
 
     /// Follow the playhead (seek restarts prefetch from the new position) and refresh the HUD figure.

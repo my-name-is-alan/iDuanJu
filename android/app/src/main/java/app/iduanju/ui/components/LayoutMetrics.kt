@@ -28,7 +28,11 @@ data class LayoutMetrics(
 
     val isTablet: Boolean get() = smallestWidthDp >= 600
     val isLandscape: Boolean get() = widthDp > heightDp
+    val isUltra: Boolean get() = widthDp >= 1180
     val useRail: Boolean get() = widthDp >= 840
+    val railWidth: Dp get() = 72.dp
+    val railStartInset: Dp get() = if (useRail) railWidth else 0.dp
+    val useTwoPageReader: Boolean get() = widthDp >= 840 && isLandscape
     /** Tablet held in portrait (600..839 wide). */
     val isTabletPortrait: Boolean get() = isTablet && tier == SizeTier.Medium
     /** Tablet landscape / desktop width. */
@@ -45,10 +49,18 @@ data class LayoutMetrics(
     /** Portrait poster grid columns (home, category, manga, TVBox, library, search results). */
     val posterCols: Int
         get() = when {
-            widthDp >= 1100 -> 7
-            widthDp >= 840 -> 6
-            widthDp >= 600 -> 5
+            widthDp >= 1180 -> 6
+            widthDp >= 840 -> 5
+            widthDp >= 600 -> 4
             else -> 3
+        }
+
+    /** Continue watching equal-width grid columns on tablets (0 = horizontal phone shelf). */
+    val continueGridCols: Int
+        get() = when (tier) {
+            SizeTier.Expanded -> 4
+            SizeTier.Medium -> 2
+            SizeTier.Compact -> 0
         }
 
     /** Landscape / wide card grid columns (search hot list, landscape feeds). */
@@ -70,7 +82,7 @@ data class LayoutMetrics(
     /** Episode selector grid columns inside detail and player sheets. */
     val episodeCols: Int
         get() = when {
-            widthDp >= 1100 -> 12
+            widthDp >= 1180 -> 12
             widthDp >= 840 -> 10
             widthDp >= 600 -> 8
             else -> 6
@@ -93,10 +105,16 @@ data class LayoutMetrics(
     val detailMaxWidth: Dp
         get() = when (tier) {
             SizeTier.Compact -> Dp.Unspecified
-            SizeTier.Medium -> 760.dp
-            SizeTier.Expanded -> 900.dp
+            SizeTier.Medium -> 780.dp
+            SizeTier.Expanded -> 1240.dp
         }
-    val readerMaxWidth: Dp get() = if (tier == SizeTier.Compact) Dp.Unspecified else 720.dp
+    val readerMaxWidth: Dp
+        get() = when (tier) {
+            SizeTier.Compact -> Dp.Unspecified
+            SizeTier.Medium -> 560.dp
+            SizeTier.Expanded -> 640.dp
+        }
+    val mangaMaxWidth: Dp get() = if (tier == SizeTier.Compact) Dp.Unspecified else 760.dp
 }
 
 val LocalLayoutMetrics = staticCompositionLocalOf {

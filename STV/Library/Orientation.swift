@@ -15,6 +15,10 @@ final class StatusBarGate: ObservableObject {
         } else {
             hidden = value
         }
+        refreshAppearance()
+    }
+
+    func refreshAppearance() {
         for scene in UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }) {
             for win in scene.windows {
                 win.rootViewController?.setNeedsStatusBarAppearanceUpdate()

@@ -107,15 +107,30 @@ struct PlayerScreen: View {
                 let rect = videoRect(area)
                 ZStack(alignment: .topLeading) {
                     Color.black
+                    // Ambient Glass Stage: soft dimmed poster halo behind 9:16 portrait dramas on landscape iPad.
+                    if canShowPadSplit, !series.cover.isEmpty {
+                        CoverBackdrop(url: series.cover)
+                            .opacity(0.24)
+                            .overlay(
+                                RadialGradient(
+                                    colors: [Color.black.opacity(0.18), Color.black.opacity(0.84)],
+                                    center: .center,
+                                    startRadius: 80,
+                                    endRadius: max(full.width, full.height) * 0.65
+                                )
+                            )
+                            .frame(width: full.width, height: full.height)
+                            .allowsHitTesting(false)
+                    }
                     // A single in-window layer remains the PiP source across paging, rotation and buffering.
-                    FeedDrift(feed: feed, index: co.current ?? 0, page: full.height) {
+                    FeedDrift(feed: feed, index: co.current ?? 0, page: full.height, active: !feedSettled) {
                         videoLayer.frame(width: area.width, height: area.height)
                     }
                     .offset(x: area.minX, y: area.minY)
                     .allowsHitTesting(false)
                     if let held = co.heldFrame {
                         // Previous episode's last frame, riding with the swipe until the next one is on screen.
-                        FeedDrift(feed: feed, index: held.index, page: full.height) {
+                        FeedDrift(feed: feed, index: held.index, page: full.height, active: !feedSettled) {
                             Image(uiImage: held.image).resizable().frame(width: area.width, height: area.height)
                         }
                         .offset(x: area.minX, y: area.minY)
@@ -123,7 +138,7 @@ struct PlayerScreen: View {
                     }
                     Group {
                         if co.current != nil {
-                            episodeFeed
+                            episodeFeed(full)
                         } else if let loadError {
                             ErrorStateView(error: loadError) { Task { await load() } }
                         } else {
@@ -371,13 +386,14 @@ struct PlayerScreen: View {
     /// top bar / cutout, `DanmakuRegion` decides how many fit above the bottom controls & subtitle guard.
     private func danmakuLayer(_ i: Int, full: CGSize, ins: EdgeInsets, previewActive: Bool = false) -> some View {
         let topSafe = max(stableSafeTop, ins.top)
+        let effectiveArea = canShowPadSplit ? min(danmaku.area.fraction, 0.22) : danmaku.area.fraction
         let r = DanmakuRegion.compute(
             screen: full,
             safeTop: topSafe,
             safeBottom: ins.bottom,
             landscape: landscape,
             showTech: showTech,
-            area: danmaku.area.fraction,
+            area: effectiveArea,
             laneHeight: DanmakuOverlay.laneHeight(danmaku),
             avoidSubtitle: danmaku.avoidSubtitle
         )
@@ -411,25 +427,22 @@ struct PlayerScreen: View {
     // MARK: Episode feed
 
     @ViewBuilder
-    private var episodeFeed: some View {
+    private func episodeFeed(_ full: CGSize) -> some View {
         let isScrollDisabled = locked || speedMode || scrubbing || co.pipActive || panel != nil || adjuster.hud != nil
         if #available(iOS 18.0, *) {
-            ScrollView(.vertical) {
-                LazyVStack(spacing: 0) {
-                    ForEach(co.episodes.indices, id: \.self) { i in
-                        stage(i).containerRelativeFrame([.horizontal, .vertical]).id(i)
-                    }
-                }.scrollTargetLayout()
+            EpisodeFeed18(
+                count: co.episodes.count,
+                current: co.current,
+                pageSize: full,
+                feed: feed,
+                isScrollDisabled: isScrollDisabled,
+                feedSettled: $feedSettled,
+                onSelect: { co.select($0) },
+                onSettledCheck: { releaseHeldIfSettled() }
+            ) { i in
+                stage(i)
             }
-            .scrollTargetBehavior(.paging)
-            .scrollIndicators(.hidden)
-            .scrollPosition(id: Binding(get: { co.current }, set: { co.select($0) }), anchor: .center)
-            .onScrollGeometryChange(for: CGFloat.self, of: { $0.contentOffset.y }) { _, y in feed.y = y }
             .compatOnChange(of: co.readyIndex) { releaseHeldIfSettled() }
-            .onScrollPhaseChange { _, phase in feedSettled = phase == .idle; releaseHeldIfSettled() }
-            .accessibilityIdentifier("player.feed")
-            .accessibilityValue(feedSettled ? "idle" : "scrolling")
-            .scrollDisabled(isScrollDisabled)
         } else {
             GeometryReader { geo in
                 let pageH = max(1, geo.size.height)
@@ -467,6 +480,12 @@ struct PlayerScreen: View {
                             releaseHeldIfSettled()
                         }
                 )
+                .onAppear {
+                    if let cur = co.current { feed.y = CGFloat(cur) * pageH }
+                }
+                .compatOnChange(of: pageH) { h in
+                    if let cur = co.current, feedSettled { feed.y = CGFloat(cur) * h }
+                }
                 .compatOnChange(of: co.current) { new in
                     if let new {
                         feed.y = CGFloat(new) * pageH
@@ -480,37 +499,54 @@ struct PlayerScreen: View {
         }
     }
 
-    /// Right-hand persistent drawer for 9:16 short dramas on landscape iPad (Design 03).
+    /// Right-hand frameless smoked-glass drawer for 9:16 short dramas on landscape iPad (Ambient Glass Stage).
     private var padSplitDrawer: some View {
         let ranges = EpisodeGroups.ranges(total: co.episodes.count)
         let curIdx = co.current ?? 0
         return VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(co.detail?.title ?? series.title)
-                    .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                Spacer()
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(co.detail?.title ?? series.title)
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    if co.episodes.count > 1 {
+                        Text("第 \(curIdx + 1) / \(co.episodes.count) 集")
+                            .font(.system(size: 12, weight: .medium).monospacedDigit())
+                            .foregroundStyle(.white.opacity(0.56))
+                    }
+                }
+                Spacer(minLength: 4)
                 Button { withAnimation(.compatSnappy) { padDrawerOpen = false } } label: {
-                    Text("收起")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(STVTheme.accent)
-                        .padding(.horizontal, 12).frame(height: 30)
-                        .background(STVTheme.accentSoft, in: Capsule())
-                        .contentShape(Capsule())
+                    Image(systemName: "sidebar.trailing")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.86))
+                        .frame(width: 34, height: 34)
+                        .liquidGlass(Circle(), tone: .clear, interactive: true, onMedia: true)
                 }
                 .buttonStyle(PressScale())
+                .accessibilityLabel("收起侧栏")
             }
+            Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1)
             EpisodePickerSheet(episodes: co.episodes, ranges: ranges, current: curIdx) { i in
                 co.select(i)
             }
             .frame(maxHeight: .infinity)
+            Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1)
             PlayerDecodeSummary(telemetry: co.telemetry, engine: co.engineKind)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 18)
-        .background(Color(red: 0.082, green: 0.094, blue: 0.122).ignoresSafeArea())
-        .overlay(alignment: .leading) { Rectangle().fill(Color.white.opacity(0.08)).frame(width: 1) }
+        .background {
+            ZStack {
+                Color(red: 0.067, green: 0.075, blue: 0.090).opacity(0.92)
+                if !series.cover.isEmpty {
+                    CoverBackdrop(url: series.cover).opacity(0.14)
+                }
+            }
+            .ignoresSafeArea()
+        }
+        .overlay(alignment: .leading) { Rectangle().fill(Color.white.opacity(0.10)).frame(width: 1) }
     }
 
     /// Drop the previous episode's still once the new one has rendered frame 0 and the page has stopped moving.
@@ -1824,19 +1860,141 @@ struct PlayerTouchCatcher: UIViewRepresentable {
     }
 }
 
+/// iOS 18+ paging episode feed using explicit `ScrollPosition` + exact y-offset synchronization.
+/// Avoids SwiftUI's `LazyVStack` initial `.scrollPosition(id:)` stall at page 0 when opening episode N > 0.
+@available(iOS 18.0, *)
+private struct EpisodeFeed18<Stage: View>: View {
+    let count: Int
+    let current: Int?
+    let pageSize: CGSize
+    let feed: FeedOffset
+    let isScrollDisabled: Bool
+    @Binding var feedSettled: Bool
+    let onSelect: (Int) -> Void
+    let onSettledCheck: () -> Void
+    @ViewBuilder let stage: (Int) -> Stage
+
+    @State private var position: ScrollPosition
+    @State private var lastOffsetY: CGFloat = 0
+    @State private var alignedOnce = false
+    @State private var programmaticScrollUntil: Date = .distantPast
+
+    init(
+        count: Int,
+        current: Int?,
+        pageSize: CGSize,
+        feed: FeedOffset,
+        isScrollDisabled: Bool,
+        feedSettled: Binding<Bool>,
+        onSelect: @escaping (Int) -> Void,
+        onSettledCheck: @escaping () -> Void,
+        @ViewBuilder stage: @escaping (Int) -> Stage
+    ) {
+        self.count = count
+        self.current = current
+        self.pageSize = pageSize
+        self.feed = feed
+        self.isScrollDisabled = isScrollDisabled
+        self._feedSettled = feedSettled
+        self.onSelect = onSelect
+        self.onSettledCheck = onSettledCheck
+        self.stage = stage
+        self._position = State(initialValue: ScrollPosition(id: current, anchor: .top))
+    }
+
+    private var syncKey: String {
+        "\(current ?? -1)|\(count)|\(Int(pageSize.height.rounded()))"
+    }
+
+    var body: some View {
+        let pageW = max(1, pageSize.width)
+        let pageH = max(1, pageSize.height)
+        ScrollView(.vertical) {
+            LazyVStack(spacing: 0) {
+                ForEach(0..<count, id: \.self) { i in
+                    stage(i)
+                        .frame(width: pageW, height: pageH)
+                        .id(i)
+                }
+            }
+            .scrollTargetLayout()
+        }
+        .scrollTargetBehavior(.paging)
+        .scrollIndicators(.hidden)
+        .scrollPosition($position, anchor: .top)
+        .onScrollGeometryChange(for: CGFloat.self, of: { $0.contentOffset.y }) { _, y in
+            lastOffsetY = y
+            if alignedOnce || !feedSettled {
+                feed.y = y
+            }
+        }
+        .onScrollPhaseChange { _, phase in
+            let settled = phase == .idle
+            feedSettled = settled
+            if settled {
+                if alignedOnce, Date() >= programmaticScrollUntil, pageH > 1, count > 0 {
+                    let landed = max(0, min(count - 1, Int((lastOffsetY / pageH).rounded())))
+                    if landed != current { onSelect(landed) }
+                }
+                onSettledCheck()
+            }
+        }
+        .onChange(of: position.viewID(type: Int.self)) { _, newID in
+            guard alignedOnce, Date() >= programmaticScrollUntil, !feedSettled, let newID, newID != current else { return }
+            onSelect(newID)
+        }
+        .task(id: syncKey) {
+            guard let target = current, count > 0, pageSize.height > 1 else { return }
+            let expectedY = CGFloat(target) * pageH
+            feed.y = expectedY
+            if abs(lastOffsetY - expectedY) > 2 || position.viewID(type: Int.self) != target {
+                programmaticScrollUntil = Date().addingTimeInterval(0.30)
+                position.scrollTo(y: expectedY)
+                for delayMs in [16, 60, 140] {
+                    try? await Task.sleep(for: .milliseconds(delayMs))
+                    guard !Task.isCancelled else { return }
+                    if abs(lastOffsetY - expectedY) > 2 {
+                        programmaticScrollUntil = Date().addingTimeInterval(0.25)
+                        position.scrollTo(y: expectedY)
+                    } else {
+                        break
+                    }
+                }
+            }
+            if !Task.isCancelled {
+                feed.y = expectedY
+                alignedOnce = true
+            }
+        }
+        .accessibilityIdentifier("player.feed")
+        .accessibilityValue(feedSettled ? "idle" : "scrolling")
+        .scrollDisabled(isScrollDisabled)
+    }
+}
+
+/// Pure offset math for `FeedDrift`, exposed for unit testing.
+enum FeedDriftMath {
+    static func offset(feedY: CGFloat, index: Int, page: CGFloat, active: Bool) -> CGFloat {
+        guard active, page > 0 else { return 0 }
+        return -max(-page, min(page, feedY - CGFloat(index) * page))
+    }
+}
+
 /// Feed scroll position, shared by reference (see `PlayerScreen.feed`).
 @MainActor final class FeedOffset: ObservableObject {
     @Published var y: CGFloat = 0
 }
 
-/// Moves its content with the feed: offset of page `index` from rest, capped at one page either way.
+/// Moves its content with the feed while actively scrolling; snaps to 0 when settled so a stale scroll offset
+/// can never strand the video layer off-screen.
 private struct FeedDrift<Content: View>: View {
     @ObservedObject var feed: FeedOffset
     let index: Int
     let page: CGFloat
+    let active: Bool
     @ViewBuilder let content: Content
     var body: some View {
-        content.offset(y: page > 0 ? -max(-page, min(page, feed.y - CGFloat(index) * page)) : 0)
+        content.offset(y: FeedDriftMath.offset(feedY: feed.y, index: index, page: page, active: active))
     }
 }
 

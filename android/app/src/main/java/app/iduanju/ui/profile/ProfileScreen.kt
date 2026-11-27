@@ -105,141 +105,208 @@ fun ProfileScreen(onOpenDetail: (String) -> Unit = {}) {
         derivedStateOf { lib.favorites.entries.sortedByDescending { it.value.third }.take(6).map { FavoriteItem(it.key, it.value.first, it.value.second) } }
     }
     val ver = remember { runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull() ?: "" }
-    val cols = LocalLayoutMetrics.current.posterCols
+    val metrics = LocalLayoutMetrics.current
+    val cols = metrics.posterCols
 
-    LazyColumn(
-        Modifier.fillMaxSize().background(c.bg).statusBarsPadding(),
-        contentPadding = PaddingValues(top = 12.dp, bottom = rootBottomInset() + 12.dp),
-        verticalArrangement = Arrangement.spacedBy(22.dp),
-    ) {
-        item("title", "title") {
-            Text("我的", color = c.text, fontWeight = FontWeight.Black, fontSize = 32.sp, modifier = Modifier.padding(horizontal = 16.dp).semantics { heading() })
-        }
-        item("account", "account") {
-            AccountCard(ia.hgWebAccount.profile, ia.hgWebAccount.lastSyncNote, { go("hongguo-login") }) { confirmLogout = true }
-        }
-        if (watching.isNotEmpty()) item("watching", "shelf") { ContinueShelf(watching, onOpenDetail, { go("library/history") }) { lib.removeProgress(it) } }
-        item("favorites", "header") {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("我的收藏", color = c.text, fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f).semantics { heading() })
-                    Text(
-                        if (lib.favorites.isEmpty()) "全部 0" else "管理 · 全部 ${lib.favorites.size}",
-                        color = c.secondary,
-                        fontSize = 14.sp,
-                        modifier = Modifier.pressClick { go("library/favorites") },
-                    )
-                }
-                if (favorites.isEmpty()) Text("在详情页或播放页点 ♥ 收藏 · 长按卡片可移出", color = c.secondary, fontSize = 14.sp, modifier = Modifier.padding(horizontal = 16.dp))
-                else Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    favorites.chunked(cols).forEach { row ->
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            row.forEach { f ->
-                                FavoriteManageCell(
-                                    title = f.title,
-                                    cover = f.cover,
-                                    modifier = Modifier.weight(1f),
-                                    onOpenDetail = { onOpenDetail(f.sid) },
-                                    onPlay = {
-                                        val ep = lib.progress(f.sid)?.episodeNumber ?: 1
-                                        go(Routes.player(f.sid, ep))
-                                    },
-                                    onRemove = {
-                                        lib.removeFavorite(f.sid)
-                                        notify("已移出收藏")
-                                    },
-                                )
-                            }
-                            repeat(cols - row.size) { Spacer(Modifier.weight(1f)) }
+    val favoritesBlock: @Composable (Int) -> Unit = { favCols ->
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("我的收藏", color = c.text, fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f).semantics { heading() })
+                Text(
+                    if (lib.favorites.isEmpty()) "全部 0" else "管理 · 全部 ${lib.favorites.size}",
+                    color = c.secondary,
+                    fontSize = 14.sp,
+                    modifier = Modifier.pressClick { go("library/favorites") },
+                )
+            }
+            if (favorites.isEmpty()) Text("在详情页或播放页点 ♥ 收藏 · 长按卡片可移出", color = c.secondary, fontSize = 14.sp, modifier = Modifier.padding(horizontal = 16.dp))
+            else Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                favorites.chunked(favCols).forEach { row ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        row.forEach { f ->
+                            FavoriteManageCell(
+                                title = f.title,
+                                cover = f.cover,
+                                modifier = Modifier.weight(1f),
+                                onOpenDetail = { onOpenDetail(f.sid) },
+                                onPlay = {
+                                    val ep = lib.progress(f.sid)?.episodeNumber ?: 1
+                                    go(Routes.player(f.sid, ep))
+                                },
+                                onRemove = {
+                                    lib.removeFavorite(f.sid)
+                                    notify("已移出收藏")
+                                },
+                            )
                         }
+                        repeat(favCols - row.size) { Spacer(Modifier.weight(1f)) }
                     }
                 }
             }
         }
-        item("library", "group") {
-            GroupItem {
-                LinkRow("观看历史", ProfileIcons.history, trailing = lib.history.size.takeIf { it > 0 }?.toString()) { go("library/history") }
-                RowDivider()
-                LinkRow("剧星榜", ProfileIcons.star) { go("actorRank") }
-                RowDivider()
-                LinkRow("我的收藏", ProfileIcons.heart, trailing = "${lib.favorites.size}") { go("library/favorites") }
+    }
+
+    val libraryGroupBlock: @Composable () -> Unit = {
+        GroupItem {
+            LinkRow("观看历史", ProfileIcons.history, trailing = lib.history.size.takeIf { it > 0 }?.toString()) { go("library/history") }
+            RowDivider()
+            LinkRow("剧星榜", ProfileIcons.star) { go("actorRank") }
+            RowDivider()
+            LinkRow("我的收藏", ProfileIcons.heart, trailing = "${lib.favorites.size}") { go("library/favorites") }
+        }
+    }
+
+    val contentGroupBlock: @Composable () -> Unit = {
+        GroupItem {
+            LinkRow("Telegram 频道", ProfileIcons.telegram, trailing = "${ia.tg.visible(ia.cms.adultUnlocked).size} 个") { go("home/channels") }
+            RowDivider()
+            LinkRow("漫画", ProfileIcons.manga, trailing = ia.manga.favorites.size.takeIf { it > 0 }?.let { "收藏 $it" }) { go("home/manga") }
+            RowDivider()
+            LinkRow("小说", ProfileIcons.manga, sub = "TXT、阅读书源、搜索与发现") { go("novel") }
+            RowDivider()
+            LinkRow("下载管理", ProfileIcons.download, trailing = "暂未支持") { notify("Android 版暂不支持离线下载") }
+        }
+    }
+
+    val backupGroupBlock: @Composable () -> Unit = {
+        GroupItem("数据备份与迁移") {
+            LinkRow(
+                "WebDAV 多端同步",
+                ProfileIcons.cloud,
+                trailing = ia.webdav.statusBadge ?: "未配置",
+                sub = "iOS / Android 双向合并进度、收藏与已装插件",
+            ) { go("webdav") }
+            RowDivider()
+            LinkRow(
+                if (backupBusy) "正在处理备份…" else "导出完整备份（.idjbackup）",
+                ProfileIcons.backup,
+                sub = "无损打包插件、采集站、TVBox、进度、收藏与书源",
+            ) {
+                if (!backupBusy) {
+                    val stamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date())
+                    exportBackupLauncher.launch("i短剧备份-$stamp.${AppBackup.FILE_EXTENSION}")
+                }
+            }
+            RowDivider()
+            LinkRow(
+                "从备份文件恢复",
+                ProfileIcons.restore,
+                sub = "智能合并导入，不覆盖本机更新的观看进度",
+            ) {
+                if (!backupBusy) importBackupLauncher.launch(arrayOf("*/*"))
             }
         }
-        item("content", "group") {
-            GroupItem {
-                LinkRow("Telegram 频道", ProfileIcons.telegram, trailing = "${ia.tg.visible(ia.cms.adultUnlocked).size} 个") { go("home/channels") }
-                RowDivider()
-                LinkRow("漫画", ProfileIcons.manga, trailing = ia.manga.favorites.size.takeIf { it > 0 }?.let { "收藏 $it" }) { go("home/manga") }
-                RowDivider()
-                LinkRow("小说", ProfileIcons.manga, sub = "TXT、阅读书源、搜索与发现") { go("novel") }
-                RowDivider()
-                LinkRow("下载管理", ProfileIcons.download, trailing = "暂未支持") { notify("Android 版暂不支持离线下载") }
+    }
+
+    val manageGroupBlock: @Composable () -> Unit = {
+        GroupItem {
+            val adult = ia.cms.adultUnlocked
+            LinkRow("片源管理", ProfileIcons.sources, trailing = if (adult) "红果 · 黄果" else "红果") { go("sources") }
+            RowDivider()
+            val n = ia.plugins.plugins.count { !it.adult || adult } + ia.cms.sites.count { !it.adult || adult }
+            LinkRow("插件", ProfileIcons.plugin, trailing = n.takeIf { it > 0 }?.let { "$it 个" }) { go("plugins") }
+            RowDivider()
+            LinkRow("开源许可", ProfileIcons.license) { go("licenses") }
+            RowDivider()
+            val up = ia.updater
+            LinkRow("检查更新", ProfileIcons.update, trailing = if (up.checking) "检查中…" else up.currentVersion.joinToString(".")) {
+                scope.launch { up.manualCheck()?.let(notify) }
             }
         }
-        item("backup", "group") {
-            GroupItem("数据备份与迁移") {
-                LinkRow(
-                    "WebDAV 多端同步",
-                    ProfileIcons.cloud,
-                    trailing = ia.webdav.statusBadge ?: "未配置",
-                    sub = "iOS / Android 双向合并进度、收藏与已装插件",
-                ) { go("webdav") }
+    }
+
+    val maintenanceGroupBlock: @Composable () -> Unit = {
+        GroupItem {
+            ActRow("重置红果设备注册", ProfileIcons.reset, scope, notify) { withContext(Dispatchers.IO) { ia.hongguo.resetDevice() }; "已重置红果设备" }
+            RowDivider()
+            if (ia.cms.adultUnlocked) {
+                ActRow("重置黄果访客会话", ProfileIcons.key, scope, notify) { withContext(Dispatchers.IO) { ia.huangguo.resetSession() }; "已清除黄果会话" }
                 RowDivider()
-                LinkRow(
-                    if (backupBusy) "正在处理备份…" else "导出完整备份（.idjbackup）",
-                    ProfileIcons.backup,
-                    sub = "无损打包插件、采集站、TVBox、进度、收藏与书源",
+            }
+            ActRow("清空封面缓存", ProfileIcons.photos, scope, notify) {
+                coil.Coil.imageLoader(ctx).let { l -> l.memoryCache?.clear(); withContext(Dispatchers.IO) { l.diskCache?.clear() } }; "封面缓存已清空"
+            }
+            RowDivider()
+            ActRow("清空播放缓存", ProfileIcons.trash, scope, notify) { withContext(Dispatchers.IO) { java.io.File(ctx.cacheDir, "hg-play").deleteRecursively() }; "播放缓存已清空" }
+        }
+    }
+
+    val footerBlock: @Composable () -> Unit = {
+        Text(
+            message ?: "所有数据由本机直连上游，观看记录和收藏只保存在本机。\ni短剧 $ver",
+            color = if (message != null) c.accent else c.secondary,
+            fontSize = 12.sp,
+            lineHeight = 18.sp,
+            modifier = Modifier.padding(horizontal = 16.dp),
+        )
+    }
+
+    if (metrics.tier == SizeTier.Expanded) {
+        Box(Modifier.fillMaxSize().background(c.bg).statusBarsPadding(), contentAlignment = Alignment.TopCenter) {
+            Column(Modifier.widthIn(max = 1240.dp).fillMaxSize().padding(top = 12.dp)) {
+                Text(
+                    "我的",
+                    color = c.text,
+                    fontWeight = FontWeight.Black,
+                    fontSize = 32.sp,
+                    modifier = Modifier.padding(horizontal = metrics.pagePadding).padding(bottom = 14.dp).semantics { heading() },
+                )
+                Row(
+                    Modifier.fillMaxSize().padding(horizontal = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
-                    if (!backupBusy) {
-                        val stamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date())
-                        exportBackupLauncher.launch("i短剧备份-$stamp.${AppBackup.FILE_EXTENSION}")
+                    LazyColumn(
+                        Modifier.weight(0.42f).fillMaxHeight(),
+                        contentPadding = PaddingValues(bottom = rootBottomInset() + 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(20.dp),
+                    ) {
+                        item("account", "account") {
+                            AccountCard(ia.hgWebAccount.profile, ia.hgWebAccount.lastSyncNote, { go("hongguo-login") }) { confirmLogout = true }
+                        }
+                        if (watching.isNotEmpty()) item("watching", "shelf") {
+                            ContinueShelf(watching, onOpenDetail, { go("library/history") }) { lib.removeProgress(it) }
+                        }
+                        item("favorites", "header") { favoritesBlock(3) }
+                        item("library", "group") { libraryGroupBlock() }
+                    }
+                    LazyColumn(
+                        Modifier.weight(0.58f).fillMaxHeight(),
+                        contentPadding = PaddingValues(bottom = rootBottomInset() + 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(20.dp),
+                    ) {
+                        item("content", "group") { contentGroupBlock() }
+                        item("backup", "group") { backupGroupBlock() }
+                        item("look", "group") { GroupItem("外观") { AppearanceRows() } }
+                        item("manage", "group") { manageGroupBlock() }
+                        item("maintenance", "group") { maintenanceGroupBlock() }
+                        item("footer", "footer") { footerBlock() }
                     }
                 }
-                RowDivider()
-                LinkRow(
-                    "从备份文件恢复",
-                    ProfileIcons.restore,
-                    sub = "智能合并导入，不覆盖本机更新的观看进度",
-                ) {
-                    if (!backupBusy) importBackupLauncher.launch(arrayOf("*/*"))
-                }
             }
         }
-        item("look", "group") { GroupItem("外观") { AppearanceRows() } }
-        item("manage", "group") {
-            GroupItem {
-                val adult = ia.cms.adultUnlocked
-                LinkRow("片源管理", ProfileIcons.sources, trailing = if (adult) "红果 · 黄果" else "红果") { go("sources") }
-                RowDivider()
-                val n = ia.plugins.plugins.count { !it.adult || adult } + ia.cms.sites.count { !it.adult || adult }
-                LinkRow("插件", ProfileIcons.plugin, trailing = n.takeIf { it > 0 }?.let { "$it 个" }) { go("plugins") }
-                RowDivider()
-                LinkRow("开源许可", ProfileIcons.license) { go("licenses") }
-                RowDivider()
-                val up = ia.updater
-                LinkRow("检查更新", ProfileIcons.update, trailing = if (up.checking) "检查中…" else up.currentVersion.joinToString(".")) {
-                    scope.launch { up.manualCheck()?.let(notify) }
+    } else {
+        Box(Modifier.fillMaxSize().background(c.bg).statusBarsPadding(), contentAlignment = Alignment.TopCenter) {
+            LazyColumn(
+                Modifier.widthIn(max = if (metrics.tier == SizeTier.Medium) 740.dp else androidx.compose.ui.unit.Dp.Unspecified).fillMaxSize(),
+                contentPadding = PaddingValues(top = 12.dp, bottom = rootBottomInset() + 12.dp),
+                verticalArrangement = Arrangement.spacedBy(22.dp),
+            ) {
+                item("title", "title") {
+                    Text("我的", color = c.text, fontWeight = FontWeight.Black, fontSize = 32.sp, modifier = Modifier.padding(horizontal = 16.dp).semantics { heading() })
                 }
+                item("account", "account") {
+                    AccountCard(ia.hgWebAccount.profile, ia.hgWebAccount.lastSyncNote, { go("hongguo-login") }) { confirmLogout = true }
+                }
+                if (watching.isNotEmpty()) item("watching", "shelf") { ContinueShelf(watching, onOpenDetail, { go("library/history") }) { lib.removeProgress(it) } }
+                item("favorites", "header") { favoritesBlock(cols) }
+                item("library", "group") { libraryGroupBlock() }
+                item("content", "group") { contentGroupBlock() }
+                item("backup", "group") { backupGroupBlock() }
+                item("look", "group") { GroupItem("外观") { AppearanceRows() } }
+                item("manage", "group") { manageGroupBlock() }
+                item("maintenance", "group") { maintenanceGroupBlock() }
+                item("footer", "footer") { footerBlock() }
             }
-        }
-        item("maintenance", "group") {
-            GroupItem {
-                ActRow("重置红果设备注册", ProfileIcons.reset, scope, notify) { withContext(Dispatchers.IO) { ia.hongguo.resetDevice() }; "已重置红果设备" }
-                RowDivider()
-                if (ia.cms.adultUnlocked) {
-                    ActRow("重置黄果访客会话", ProfileIcons.key, scope, notify) { withContext(Dispatchers.IO) { ia.huangguo.resetSession() }; "已清除黄果会话" }
-                    RowDivider()
-                }
-                ActRow("清空封面缓存", ProfileIcons.photos, scope, notify) {
-                    coil.Coil.imageLoader(ctx).let { l -> l.memoryCache?.clear(); withContext(Dispatchers.IO) { l.diskCache?.clear() } }; "封面缓存已清空"
-                }
-                RowDivider()
-                ActRow("清空播放缓存", ProfileIcons.trash, scope, notify) { withContext(Dispatchers.IO) { java.io.File(ctx.cacheDir, "hg-play").deleteRecursively() }; "播放缓存已清空" }
-            }
-        }
-        item("footer", "footer") {
-            Text(message ?: "所有数据由本机直连上游，观看记录和收藏只保存在本机。\ni短剧 $ver",
-                color = if (message != null) c.accent else c.secondary, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.padding(horizontal = 16.dp))
         }
     }
 

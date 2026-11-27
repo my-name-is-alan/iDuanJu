@@ -250,31 +250,55 @@ fun HomeScreen(onOpenDetail: (String) -> Unit, onSearch: () -> Unit = {}, onPlay
     val haze = remember { dev.chrisbanes.haze.HazeState() }
     Box(Modifier.fillMaxSize().background(c.bg)) {
         Box(Modifier.fillMaxSize().layerBackdrop(homeBackdrop)) { AmbientGlow(visible = !pinned) }
+        val metrics = LocalLayoutMetrics.current
         Column(Modifier.fillMaxSize().then(if (immersive) Modifier else Modifier.statusBarsPadding())) {
-            // header: search + filter capsule
+            // header: compact single-row bar on Expanded tablets (72dp rail has top search), 2-row bar on compact/medium.
             if (!immersive) Column(Modifier.dsPinned(pinned, haze).padding(top = 6.dp)) {
-                Row(
-                    Modifier.padding(horizontal = 16.dp).fillMaxWidth().height(IntrinsicSize.Min)
-                        // same glass material as the dock / detail chrome (follows 我的 → 玻璃质感)
-                        .glassSurface(RoundedCornerShape(50), backdrop = homeBackdrop, shadowRadius = 0.dp, fallbackAlpha = if (c.dark) 0.60f else 0.80f)
-                        .heightIn(min = 46.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Row(Modifier.weight(1f).fillMaxHeight().testTag("home.search").pressClick(0.98f, label = "搜索", onClick = onSearch).padding(start = 16.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Filled.Search, null, tint = c.secondary, modifier = Modifier.size(20.dp))
-                        Spacer(Modifier.width(10.dp))
-                        Text("搜索你想看的作品", color = c.secondary, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                    Row(Modifier.fillMaxHeight().testTag("home.filter").pressClick(label = "筛选与全部频道") { HomeChannelSheetOpen.value = true }.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Filled.FilterList, null, tint = c.text, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(5.dp))
-                        Text("筛选", color = c.text, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
-                    }
-                }
-                Spacer(Modifier.height(10.dp))
                 val selectedPage = pager.currentPage.coerceIn(0, (pages.size - 1).coerceAtLeast(0))
-                ChannelBar(pages, selectedPage) { jumpToPage(it) }
+                if (metrics.useRail) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(end = metrics.pagePadding),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(Modifier.weight(1f)) {
+                            ChannelBar(pages, selectedPage) { jumpToPage(it) }
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Row(
+                            Modifier.height(38.dp)
+                                .glassSurface(RoundedCornerShape(50), backdrop = homeBackdrop, shadowRadius = 0.dp, fallbackAlpha = if (c.dark) 0.62f else 0.82f)
+                                .testTag("home.filter").pressClick(label = "筛选与全部频道") { HomeChannelSheetOpen.value = true }
+                                .padding(horizontal = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(Icons.Filled.FilterList, null, tint = c.text, modifier = Modifier.size(15.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text("筛选", color = c.text, fontSize = 13.5.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                        }
+                    }
+                } else {
+                    Row(
+                        Modifier.padding(horizontal = metrics.pagePadding).fillMaxWidth().height(IntrinsicSize.Min)
+                            // same glass material as the dock / detail chrome (follows 我的 → 玻璃质感)
+                            .glassSurface(RoundedCornerShape(50), backdrop = homeBackdrop, shadowRadius = 0.dp, fallbackAlpha = if (c.dark) 0.60f else 0.80f)
+                            .heightIn(min = 46.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Row(Modifier.weight(1f).fillMaxHeight().testTag("home.search").pressClick(0.98f, label = "搜索", onClick = onSearch).padding(start = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Filled.Search, null, tint = c.secondary, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(10.dp))
+                            Text("搜索你想看的作品", color = c.secondary, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        Row(Modifier.fillMaxHeight().testTag("home.filter").pressClick(label = "筛选与全部频道") { HomeChannelSheetOpen.value = true }.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Filled.FilterList, null, tint = c.text, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text("筛选", color = c.text, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    ChannelBar(pages, selectedPage) { jumpToPage(it) }
+                }
                 if (HomeChannelSheetOpen.value) ChannelSheet(pages, selectedPage, onDismiss = { HomeChannelSheetOpen.value = false }) { page, sub ->
                     HomeChannelSheetOpen.value = false
                     if (sub != null) HomeSubSel.map[pages[page].label] = sub
@@ -315,13 +339,14 @@ private fun AiPage(onOpen: (String) -> Unit) {
     if (!IdjApp.instance.cms.adultUnlocked) { FeedPage(HomeSource.ai, onOpen); return }
     val aiTabs = remember { listOf("红果 AI剧", "黄果 AI 站") }
     val sel = (HomeSubSel.map[HomeSource.ai.label] ?: 0).coerceIn(0, 1)
+    val metrics = LocalLayoutMetrics.current
     Column(Modifier.fillMaxSize()) {
         SegmentedTabs(
             items = aiTabs,
             selected = aiTabs[sel],
             label = { it },
             onSelect = { HomeSubSel.map[HomeSource.ai.label] = aiTabs.indexOf(it) },
-            modifier = Modifier.padding(horizontal = 16.dp).padding(bottom = 12.dp),
+            modifier = Modifier.padding(horizontal = metrics.pagePadding).padding(bottom = 12.dp),
         )
         Box(Modifier.weight(1f)) {
             if (sel == 1) app.iduanju.huangguo.HuangguoFeedPage(onOpen, aiOnly = true)
@@ -455,6 +480,7 @@ private fun FeedPage(source: HomeSource, onOpen: (String) -> Unit) {
         app.iduanju.ui.profile.ActorRankList(rootBottomInset() + 16.dp, list) { subTabs(Modifier.padding(bottom = 6.dp)) }
         return
     }
+    val metrics = LocalLayoutMetrics.current
     val library = IdjApp.instance.library
     val watching by remember { derivedStateOf { library.continueWatching.take(10) } }
     val scope = rememberCoroutineScope()
@@ -466,7 +492,7 @@ private fun FeedPage(source: HomeSource, onOpen: (String) -> Unit) {
         }
     }, Modifier.fillMaxSize()) {
         LazyColumn(Modifier.fillMaxSize(), list, PaddingValues(bottom = rootBottomInset() + 16.dp)) {
-            if (subs.size > 1) item("tabs", "tabs") { subTabs(Modifier.padding(horizontal = 16.dp).padding(bottom = 16.dp)) }
+            if (subs.size > 1) item("tabs", "tabs") { subTabs(Modifier.padding(horizontal = metrics.pagePadding).padding(bottom = 16.dp)) }
             item("hero", "hero") { FeedHero(boards.firstOrNull(), onOpen) }
             if (source == HomeSource.hongguo && watching.isNotEmpty()) item("watching", "watching") {
                 Box(Modifier.padding(top = 24.dp)) { ContinueRow(watching, onOpen) }
@@ -540,11 +566,15 @@ private fun PosterHero(board: String, picks: List<HGSeries>, onOpen: (String) ->
     // Tablet: the hero card takes ~62 % and a 「热播速览」 stack fills the rest, so a wide window never shows one
     // small poster in front of an empty dark gradient.
     val withSide = metrics.tier != SizeTier.Compact && picks.size > 1
-    BoxWithConstraints(Modifier.padding(horizontal = 16.dp).fillMaxWidth()) {
-        val sideGap = 14.dp
-        val heroWidth = if (withSide) (maxWidth - sideGap) * 0.62f else maxWidth
-        // Preserve the spec's 112 dp poster on phones (132 dp on tablets); narrow windows keep a usable info column.
-        val posterMax = if (metrics.tier == SizeTier.Compact) 112.dp else 132.dp
+    BoxWithConstraints(Modifier.padding(horizontal = metrics.pagePadding).fillMaxWidth()) {
+        val sideGap = 16.dp
+        val heroWidth = if (withSide) (maxWidth - sideGap) * 0.64f else maxWidth
+        // Ambient Glass Stage cinema proportions on tablets; exact 112 dp poster preserved on phones.
+        val posterMax = when (metrics.tier) {
+            SizeTier.Expanded -> 152.dp
+            SizeTier.Medium -> 134.dp
+            SizeTier.Compact -> 112.dp
+        }
         val m = remember(picks, board, heroWidth, posterMax, density, measurer, buttonStyle) {
             val posterWidth = minOf(posterMax, (heroWidth - 28.dp - 14.dp - 160.dp).coerceAtLeast(80.dp))
             val infoWidth = heroWidth - 28.dp - posterWidth - 14.dp
@@ -611,7 +641,8 @@ private fun HeroPage(i: Int, s: HGSeries, board: String, count: Int, pager: Page
                     color = Color.White.copy(0.74f), style = HeroMeta, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             Spacer(Modifier.weight(1f).heightIn(min = 8.dp))
-            val cta: @Composable () -> Unit = { HeroCta(i, m, buttonStyle) { onOpen(s.seriesId) } }
+            val prog = remember(s.seriesId) { IdjApp.instance.library.progress(s.seriesId) }
+            val cta: @Composable () -> Unit = { HeroCta(i, m, buttonStyle, prog?.fraction ?: 0f) { onOpen(s.seriesId) } }
             if (m.stackedFooter) Column(Modifier.fillMaxWidth().height(m.footerHeight)) {
                 cta()
                 Box(Modifier.fillMaxWidth().height(12.dp), contentAlignment = Alignment.CenterEnd) { HeroDots(i, count, pager) }
@@ -622,18 +653,35 @@ private fun HeroPage(i: Int, s: HGSeries, board: String, count: Int, pager: Page
     }
 }
 
-/** Explicit 48 dp hit slot; the spec's 32 dp pill stays visually compact. */
+/** Explicit 48 dp hit slot; Ambient Glass Stage crisp white pill with embedded #286DEF progress rail on tablets. */
 @Composable
-private fun HeroCta(i: Int, m: HeroMetrics, style: TextStyle, onClick: () -> Unit) {
+private fun HeroCta(i: Int, m: HeroMetrics, style: TextStyle, resumeFraction: Float = 0f, onClick: () -> Unit) {
+    val tablet = LocalLayoutMetrics.current.tier != SizeTier.Compact
     Box(Modifier.height(m.touchHeight).width(m.ctaWidth).testTag("home.hero.cta.$i")
         .pressClick(0.98f, label = HERO_CTA, onClick = onClick), contentAlignment = Alignment.Center) {
-        // Glass CTA over the blurred hero, following 我的 → 液态玻璃 / 毛玻璃.
-        Row(Modifier.fillMaxWidth().height(m.pillHeight).testTag("home.hero.pill.$i")
-            .glassSurface(CircleShape, dark = true, shadowRadius = 6.dp, fallbackAlpha = 0.70f, activeOverlay = Color.White.copy(alpha = 0.10f))
-            .padding(horizontal = CtaPad),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(CtaGap)) {
-            Icon(Icons.Filled.PlayArrow, null, Modifier.size(CtaIcon), tint = Color.White)
-            Text(HERO_CTA, Modifier.weight(1f).testTag("home.hero.ctaText.$i"), color = Color.White, style = style, maxLines = 1, softWrap = false)
+        if (tablet) {
+            Box(Modifier.fillMaxWidth().height(m.pillHeight.coerceAtLeast(38.dp)).testTag("home.hero.pill.$i")
+                .clip(CircleShape).background(Color(0xFFF8FAFD))) {
+                Row(Modifier.fillMaxSize().padding(horizontal = CtaPad),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(CtaGap)) {
+                    Icon(Icons.Filled.PlayArrow, null, Modifier.size(CtaIcon), tint = Color(0xFF111317))
+                    Text(HERO_CTA, Modifier.weight(1f).testTag("home.hero.ctaText.$i"), color = Color(0xFF111317), style = style, maxLines = 1, softWrap = false)
+                }
+                if (resumeFraction > 0.01f) {
+                    Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.5.dp).background(Color(0xFF286DEF).copy(alpha = 0.20f))) {
+                        Box(Modifier.fillMaxHeight().fillMaxWidth(resumeFraction.coerceIn(0.06f, 1f)).background(Color(0xFF286DEF)))
+                    }
+                }
+            }
+        } else {
+            // Glass CTA over the blurred hero on phones, following 我的 → 液态玻璃 / 毛玻璃.
+            Row(Modifier.fillMaxWidth().height(m.pillHeight).testTag("home.hero.pill.$i")
+                .glassSurface(CircleShape, dark = true, shadowRadius = 6.dp, fallbackAlpha = 0.70f, activeOverlay = Color.White.copy(alpha = 0.10f))
+                .padding(horizontal = CtaPad),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(CtaGap)) {
+                Icon(Icons.Filled.PlayArrow, null, Modifier.size(CtaIcon), tint = Color.White)
+                Text(HERO_CTA, Modifier.weight(1f).testTag("home.hero.ctaText.$i"), color = Color.White, style = style, maxLines = 1, softWrap = false)
+            }
         }
     }
 }
@@ -716,17 +764,51 @@ private fun BoardShelf(b: BoardSpec, first: Boolean, onOpen: (String) -> Unit) {
     LaunchedEffect(b.id) { BoardCache.load(b) }
     val items = BoardCache.items[b.id]
     val failed = items == null && BoardCache.failed.containsKey(b.id)
-    // 第一个榜单一律跳过 hero 里已展示的剧
-    val list = remember(items, first, metrics.shelfItemCount) { items?.drop(if (first) HERO_PICKS else 0)?.take(metrics.shelfItemCount) }
-    // Tablet: larger cells and up to 16 items so a 1100 dp shelf fills edge to edge instead of stopping at 60 %.
+    val useTabletMatrix = first && metrics.tier != SizeTier.Compact
+    val cols = metrics.posterCols
+    // 第一个榜单一律跳过 hero 里已展示的剧；平板端首榜按列数整行截断为无框海报矩阵，消除第二行大面积空位。
+    val list = remember(items, first, useTabletMatrix, cols, metrics.shelfItemCount) {
+        val rem = items?.drop(if (first) HERO_PICKS else 0)
+        if (rem == null) null
+        else if (useTabletMatrix) {
+            val fullRows = (rem.size / cols) * cols
+            val count = if (fullRows > 0) minOf(fullRows, cols * 2) else cols
+            rem.take(count)
+        } else {
+            rem.take(metrics.shelfItemCount)
+        }
+    }
     val cell = metrics.shelfCardWidth
     val gap = if (metrics.tier == SizeTier.Compact) 10.dp else 14.dp
     Column(Modifier.padding(top = 24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SectionHeader2(b.title, if (failed) "加载失败，下拉重试" else null) { MoreLink { go("board/${b.genre.name}/${b.sub.name}") } }
-        if (!failed) LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(gap), userScrollEnabled = list != null) {
-            if (list == null) items(if (metrics.tier == SizeTier.Compact) 4 else 9, key = { "skeleton$it" }, contentType = { "skeleton" }) { PosterSkeleton(Modifier.width(cell)) }
-            else items(list, key = { it.seriesId }, contentType = { "poster" }) { s ->
-                app.iduanju.ui.category.PosterCell(s, null, homeShelfMeta(s), onOpen, Modifier.width(cell))
+        SectionHeader2(b.title, if (failed) "加载失败，下拉重试" else null, inset = metrics.pagePadding) { MoreLink { go("board/${b.genre.name}/${b.sub.name}") } }
+        if (!failed) {
+            if (useTabletMatrix) {
+                val cols = metrics.posterCols
+                val rows = (list ?: emptyList()).chunked(cols)
+                Column(Modifier.padding(horizontal = metrics.pagePadding), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+                    if (list == null) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                            repeat(cols) { PosterSkeleton(Modifier.weight(1f)) }
+                        }
+                    } else {
+                        rows.forEach { rowItems ->
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                                rowItems.forEach { s ->
+                                    app.iduanju.ui.category.PosterCell(s, null, homeShelfMeta(s), onOpen, Modifier.weight(1f))
+                                }
+                                repeat(cols - rowItems.size) { Spacer(Modifier.weight(1f)) }
+                            }
+                        }
+                    }
+                }
+            } else {
+                LazyRow(contentPadding = PaddingValues(horizontal = metrics.pagePadding), horizontalArrangement = Arrangement.spacedBy(gap), userScrollEnabled = list != null) {
+                    if (list == null) items(if (metrics.tier == SizeTier.Compact) 4 else 9, key = { "skeleton$it" }, contentType = { "skeleton" }) { PosterSkeleton(Modifier.width(cell)) }
+                    else items(list, key = { it.seriesId }, contentType = { "poster" }) { s ->
+                        app.iduanju.ui.category.PosterCell(s, null, homeShelfMeta(s), onOpen, Modifier.width(cell))
+                    }
+                }
             }
         }
     }
@@ -760,20 +842,80 @@ fun HomePosterCard(s: HGSeries, onOpen: (String) -> Unit) {
 @Composable
 fun PosterCard(s: HGSeries, onOpen: (String) -> Unit) = HomePosterCard(s, onOpen)
 
-/** ui-redesign 10 `.cw`: 296 dp cards — cover, title, 看到第 N 集 · 共 M 集, progress, round play button; long press deletes the record. */
+/** ui-redesign 10 `.cw`: 296 dp cards on phones; equal-width 4-col (Expanded) / 2-col (Medium) cinema grid on tablets. */
 @Composable
 internal fun ContinueRow(list: List<WatchProgress>, onOpen: (String) -> Unit, onPlay: ((WatchProgress) -> Unit)? = null) {
     val go = app.iduanju.ui.LocalNavigate.current
     val metrics = LocalLayoutMetrics.current
     val play: (WatchProgress) -> Unit = onPlay ?: { p -> go(Routes.resume(p)) }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SectionHeader2("继续观看") { MoreLink { go("library/history") } }
-        // A full shelf of recent dramas; tablets get 280 dp cards with a wider gap.
-        LazyRow(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 2.dp),
-            horizontalArrangement = Arrangement.spacedBy(if (metrics.tier == SizeTier.Compact) 10.dp else 14.dp)) {
-            items(list.take(10), key = { it.seriesId }, contentType = { "watching" }) { p ->
-                ContinueCard(p, onOpen, play, Modifier.animateItem().width(metrics.continueCardWidth))
+        SectionHeader2("继续观看", inset = metrics.pagePadding) { MoreLink { go("library/history") } }
+        if (metrics.continueGridCols > 0) {
+            val cols = metrics.continueGridCols
+            val visible = list.take(cols)
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = metrics.pagePadding),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                visible.forEach { p ->
+                    TabletContinueCard(p, onOpen, play, Modifier.weight(1f))
+                }
+                repeat(cols - visible.size) { Spacer(Modifier.weight(1f)) }
             }
+        } else {
+            LazyRow(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                items(list.take(10), key = { it.seriesId }, contentType = { "watching" }) { p ->
+                    ContinueCard(p, onOpen, play, Modifier.animateItem().width(metrics.continueCardWidth))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TabletContinueCard(p: WatchProgress, onOpen: (String) -> Unit, onPlay: (WatchProgress) -> Unit, modifier: Modifier) {
+    val c = IdjThemeColors
+    var menu by remember { mutableStateOf(false) }
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        Box(
+            Modifier.fillMaxWidth().aspectRatio(16f / 9f)
+                .clip(RoundedCornerShape(14.dp))
+                .background(Brush.linearGradient(listOf(Color(0xFF232836), Color(0xFF141720))))
+                .pressLongClick(0.98f, label = p.title, longLabel = "删除观看记录", onLongClick = { menu = true }) { onOpen(p.seriesId) },
+        ) {
+            if (p.cover.isNotBlank()) {
+                AsyncImage(p.cover, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop, alignment = Alignment.TopCenter)
+            } else {
+                Icon(Icons.Filled.PlayArrow, null, Modifier.align(Alignment.Center).size(30.dp), tint = Color.White.copy(0.22f))
+            }
+            Box(
+                Modifier.fillMaxSize().background(
+                    Brush.verticalGradient(
+                        0f to Color.Black.copy(0.04f),
+                        0.54f to Color.Black.copy(0.20f),
+                        1f to Color.Black.copy(0.68f),
+                    ),
+                ),
+            )
+            Box(
+                Modifier.align(Alignment.BottomEnd).padding(end = 10.dp, bottom = 11.dp).size(36.dp)
+                    .glassSurface(CircleShape, dark = true, shadowRadius = 6.dp, fallbackAlpha = 0.65f, activeOverlay = Color.White.copy(0.10f))
+                    .pressClick(label = "继续播放 ${p.title}") { onPlay(p) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Filled.PlayArrow, null, Modifier.size(18.dp).offset(x = 1.dp), tint = Color.White)
+            }
+            Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp).background(Color.White.copy(0.22f))) {
+                Box(Modifier.fillMaxHeight().fillMaxWidth(p.fraction.coerceIn(0.04f, 1f)).background(c.accent))
+            }
+            GlassMenu(menu, { menu = false }) {
+                GlassMenuItem("删除观看记录", icon = Icons.Outlined.Delete, destructive = true) { menu = false; IdjApp.instance.library.removeProgress(p.seriesId) }
+            }
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(p.title, color = c.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(remember(p.resumeLabel) { DS.spaced(p.resumeLabel) }, color = c.secondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }

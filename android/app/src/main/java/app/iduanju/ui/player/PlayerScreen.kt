@@ -15,6 +15,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
@@ -147,6 +149,17 @@ private fun PlayerStage(
         val layer = rememberLayerBackdrop { drawRect(Color.Black); drawContent() }
         val backdrop: Backdrop? = if (controls) layer else null
         Box(Modifier.fillMaxSize().then(if (controls) Modifier.layerBackdrop(layer) else Modifier)) {
+            if (padCapable) {
+                val haloCover = session.detail?.cover.orEmpty()
+                if (haloCover.isNotEmpty()) {
+                    app.iduanju.ui.components.BlurredCover(haloCover, Modifier.fillMaxSize().scale(1.25f), alpha = 0.24f)
+                    Box(
+                        Modifier.fillMaxSize().background(
+                            Brush.radialGradient(listOf(Color.Black.copy(0.20f), Color.Black.copy(0.86f))),
+                        ),
+                    )
+                }
+            }
             PlayerSurface(session, ui, enhance, aspect, height, nextDrama, Modifier.fillMaxSize())
             DanmakuLayer(session, ui, dims, inPip)
         }
@@ -225,25 +238,47 @@ private fun DanmakuLayer(session: PlayerSession, ui: PlayerUi, dims: PlayerDimen
     ) { android.util.Log.i("IDJ", "danmaku: $it") }
 }
 
-/** Large tablets in landscape with a portrait drama: the episode list beside the video. */
+/** Large tablets in landscape with a portrait drama: frameless smoked-glass side drawer beside the ambient stage. */
 @Composable
 private fun PadDrawer(session: PlayerSession, ui: PlayerUi, onSwitchSeries: (String) -> Unit) {
     val d = session.detail ?: return
     val pc = IdjDarkColors
-    Column(Modifier.width(340.dp).fillMaxHeight().background(Color(0xFF15181F)).border(1.dp, Color.White.copy(0.08f)).statusBarsPadding().navigationBarsPadding().padding(horizontal = 18.dp, vertical = 16.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(d.title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-            Spacer(Modifier.width(8.dp))
-            MiniButton("收起") { ui.padDrawerOpen = false }
+    Box(Modifier.width(340.dp).fillMaxHeight().background(Color(0xFF0E1015))) {
+        if (d.cover.isNotEmpty()) {
+            app.iduanju.ui.components.BlurredCover(d.cover, Modifier.fillMaxSize().scale(1.25f), alpha = 0.14f)
         }
-        Spacer(Modifier.height(12.dp))
-        Column(Modifier.weight(1f)) { EpisodesPanel(session, onPick = { session.select(it) }, onSeason = onSwitchSeries) }
-        Spacer(Modifier.height(10.dp))
-        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color.White.copy(0.06f)).border(1.dp, Color.White.copy(0.09f), RoundedCornerShape(14.dp)).padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("当前解码与音轨", color = Color.White.copy(0.6f), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-            val t = session.tags
-            Text(listOfNotNull(t.res, t.range, t.codec, t.audio).joinToString(" · ").ifEmpty { "Media3 + FFmpeg 软解就绪" }, color = pc.accent, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+        Box(Modifier.align(Alignment.CenterStart).width(1.dp).fillMaxHeight().background(Color.White.copy(0.10f)))
+        Column(
+            Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 18.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(d.title, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    val cur = (session.episode?.ep ?: 1)
+                    val total = d.episodes.size
+                    if (total > 1) {
+                        Text("第 $cur / $total 集", color = Color.White.copy(0.56f), fontSize = 12.sp, maxLines = 1)
+                    }
+                }
+                Spacer(Modifier.width(8.dp))
+                MiniButton("收起") { ui.padDrawerOpen = false }
+            }
+            Box(Modifier.fillMaxWidth().height(1.dp).background(Color.White.copy(0.08f)))
+            Column(Modifier.weight(1f)) { EpisodesPanel(session, onPick = { session.select(it) }, onSeason = onSwitchSeries) }
+            Box(Modifier.fillMaxWidth().height(1.dp).background(Color.White.copy(0.08f)))
+            Column(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("当前解码与音轨", color = Color.White.copy(0.54f), fontSize = 11.5.sp, fontWeight = FontWeight.Medium)
+                val t = session.tags
+                Text(
+                    listOfNotNull(t.res, t.range, t.codec, t.audio).joinToString(" · ").ifEmpty { "Media3 + FFmpeg 软解就绪" },
+                    color = pc.accent,
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }

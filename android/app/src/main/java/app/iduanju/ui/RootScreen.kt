@@ -13,6 +13,7 @@ import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -214,13 +215,15 @@ fun RootScreen(initialRoute: String? = null) {
             // Root backdrop is only active while the NavHost is recorded into it (chrome nav visible).
             LocalRootBackdrop provides (if (showChromeNav) backdrop else null),
         ) {
-            Row(Modifier.fillMaxSize().then(if (showChromeNav && !metrics.useRail) Modifier.nestedScroll(dockScroll) else Modifier)) {
+            Row(Modifier.fillMaxSize().background(IdjThemeColors.bg).then(if (showChromeNav && !metrics.useRail) Modifier.nestedScroll(dockScroll) else Modifier)) {
                 if (showChromeNav && metrics.useRail) {
                     GlassNavigationRail(
                         selected = tab,
                         items = navItems,
                         onSelect = onSelectTab,
                         backdrop = LocalRootBackdrop.current,
+                        onSearch = { nav.navigate("search") },
+                        searchIcon = { on -> Icon(Icons.Filled.Search, null, Modifier.size(20.dp), tint = if (on) IdjThemeColors.accent else IdjThemeColors.text) },
                     )
                 }
                 // NavHost content is drawn INSIDE layerBackdrop(backdrop): never hand it the root backdrop (feedback loop).

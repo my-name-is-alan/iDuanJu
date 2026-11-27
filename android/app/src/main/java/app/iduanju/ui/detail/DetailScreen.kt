@@ -217,70 +217,86 @@ fun DetailScreen(seriesId: String, onBack: () -> Unit, onPlay: (String, Int) -> 
             when {
                 useTwoPane -> {
                     val dd = d!!
-                    Row(
-                        Modifier
-                            .widthIn(max = 1160.dp)
-                            .fillMaxSize()
-                            .statusBarsPadding()
-                            .navigationBarsPadding()
-                            .padding(top = 56.dp, start = 28.dp, end = 28.dp, bottom = 24.dp),
-                        horizontalArrangement = Arrangement.spacedBy(28.dp),
-                    ) {
-                        Column(
-                            Modifier
-                                .width(340.dp)
-                                .fillMaxHeight()
-                                .verticalScroll(rememberScrollState()),
-                            verticalArrangement = Arrangement.spacedBy(14.dp),
-                        ) {
-                            val total = episodeCountText(dd)
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+                        // Ambient Glass Stage: soft optical poster halo washing into the page ground.
+                        Box(Modifier.fillMaxSize().clipToBounds()) {
+                            BlurredCover(dd.cover, Modifier.fillMaxSize().scale(1.18f), alpha = if (c.dark) 0.28f else 0.12f)
                             Box(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .aspectRatio(3f / 4f)
-                                    .heightIn(max = 420.dp)
-                                    .shadow(18.dp, RoundedCornerShape(20.dp), ambientColor = Color.Black.copy(0.45f), spotColor = Color.Black.copy(0.45f)),
-                            ) {
-                                PosterArt(dd.cover, Modifier.fillMaxSize(), corner = 20.dp)
-                            }
-                            if (dd.source.isNotBlank()) DSStatus(dd.source, StatusTone.Accent)
-                            Text(dd.title, color = c.text, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 30.sp)
-                            val meta = listOfNotNull(
-                                if (dd.episodeLabel.isEmpty()) total.takeIf { it.isNotEmpty() } else DS.spaced(dd.episodeLabel),
-                                dd.author.ifEmpty { null },
-                            ).joinToString(" · ")
-                            if (meta.isNotEmpty()) Text(meta, color = c.secondary, fontSize = 13.sp)
-                            InlineStatsRow(dd)
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                                PrimaryPlayButton(playTitle, resumeFraction, eps.isNotEmpty(), Modifier.weight(1f), height = 48.dp) { play(seriesId, startEp) }
-                                Heart(seriesId, dd, 48.dp)
-                                ShareButton(dd.title, 48.dp)
-                            }
-                        }
-                        Column(
-                            Modifier
-                                .weight(1f)
-                                .fillMaxHeight()
-                                .verticalScroll(scroll)
-                                .padding(bottom = 48.dp),
-                        ) {
-                            DetailBody(
-                                d = dd,
-                                sid = seriesId,
-                                resume = resume,
-                                eps = eps,
-                                lineIndex = lineIndex,
-                                onLine = selectLine,
-                                picker = picker,
-                                onPlay = play,
-                                onOpenSeries = onOpenSeries,
-                                onOpenAllEpisodes = { episodeDrawerOpen = true },
-                                playTitle = playTitle,
-                                resumeFraction = resumeFraction,
-                                startEp = startEp,
-                                showActions = false,
-                                onActions = { actionsBottom = it },
+                                Modifier.fillMaxSize().background(
+                                    Brush.verticalGradient(
+                                        0f to c.bg.copy(alpha = 0.28f),
+                                        0.52f to c.bg.copy(alpha = 0.84f),
+                                        1f to c.bg,
+                                    ),
+                                ),
                             )
+                        }
+                        Row(
+                            Modifier
+                                .widthIn(max = metrics.detailMaxWidth)
+                                .fillMaxSize()
+                                .statusBarsPadding()
+                                .navigationBarsPadding()
+                                .padding(top = 56.dp, start = metrics.pagePadding, end = metrics.pagePadding, bottom = 24.dp),
+                            horizontalArrangement = Arrangement.spacedBy(32.dp),
+                        ) {
+                            Column(
+                                Modifier
+                                    .weight(0.38f)
+                                    .widthIn(min = 320.dp, max = 420.dp)
+                                    .fillMaxHeight()
+                                    .verticalScroll(rememberScrollState()),
+                                verticalArrangement = Arrangement.spacedBy(14.dp),
+                            ) {
+                                val total = episodeCountText(dd)
+                                Box(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .aspectRatio(3f / 4f)
+                                        .heightIn(max = 430.dp)
+                                        .shadow(20.dp, RoundedCornerShape(20.dp), ambientColor = Color.Black.copy(0.45f), spotColor = Color.Black.copy(0.45f)),
+                                ) {
+                                    PosterArt(dd.cover, Modifier.fillMaxSize(), corner = 20.dp)
+                                }
+                                if (dd.source.isNotBlank()) DSStatus(dd.source, StatusTone.Accent)
+                                Text(dd.title, color = c.text, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 32.sp)
+                                val meta = listOfNotNull(
+                                    if (dd.episodeLabel.isEmpty()) total.takeIf { it.isNotEmpty() } else DS.spaced(dd.episodeLabel),
+                                    dd.author.ifEmpty { null },
+                                ).joinToString(" · ")
+                                if (meta.isNotEmpty()) Text(meta, color = c.secondary, fontSize = 13.5.sp)
+                                InlineStatsRow(dd)
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    PrimaryPlayButton(playTitle, resumeFraction, eps.isNotEmpty(), Modifier.weight(1f), height = 48.dp) { play(seriesId, startEp) }
+                                    Heart(seriesId, dd, 48.dp)
+                                    ShareButton(dd.title, 48.dp)
+                                }
+                            }
+                            Column(
+                                Modifier
+                                    .weight(0.62f)
+                                    .fillMaxHeight()
+                                    .verticalScroll(scroll)
+                                    .padding(bottom = 48.dp),
+                            ) {
+                                DetailBody(
+                                    d = dd,
+                                    sid = seriesId,
+                                    resume = resume,
+                                    eps = eps,
+                                    lineIndex = lineIndex,
+                                    onLine = selectLine,
+                                    picker = picker,
+                                    onPlay = play,
+                                    onOpenSeries = onOpenSeries,
+                                    onOpenAllEpisodes = { episodeDrawerOpen = true },
+                                    playTitle = playTitle,
+                                    resumeFraction = resumeFraction,
+                                    startEp = startEp,
+                                    showActions = false,
+                                    onActions = { actionsBottom = it },
+                                )
+                            }
                         }
                     }
                 }
@@ -486,10 +502,11 @@ private fun PrimaryPlayButton(
             Text(title, color = fg, fontSize = 15.5.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         if (resumeFraction > 0.02f) {
+            val barColor = Color(0xFF286DEF)
             Box(
-                Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp).background(fg.copy(alpha = 0.14f)),
+                Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.5.dp).background(barColor.copy(alpha = 0.20f)),
             ) {
-                Box(Modifier.fillMaxHeight().fillMaxWidth(resumeFraction.coerceIn(0f, 1f)).background(c.accent))
+                Box(Modifier.fillMaxHeight().fillMaxWidth(resumeFraction.coerceIn(0.06f, 1f)).background(barColor))
             }
         }
     }
@@ -681,26 +698,21 @@ private fun TabletPortraitHero(
     val c = IdjThemeColors
     val go = app.iduanju.ui.LocalNavigate.current
     val epsLabel = episodeCountText(d)
-    val cardShape = RoundedCornerShape(24.dp)
 
     Box(
         Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 24.dp)
-            .clip(cardShape)
-            .background(c.card)
-            .border(1.dp, c.hairline, cardShape),
+            .fillMaxWidth(),
     ) {
         Box(Modifier.matchParentSize().clipToBounds()) {
-            BlurredCover(d.cover, Modifier.fillMaxSize().scale(1.12f), alpha = if (c.dark) 0.36f else 0.16f)
+            BlurredCover(d.cover, Modifier.fillMaxSize().scale(1.12f), alpha = if (c.dark) 0.28f else 0.14f)
             Box(
                 Modifier
                     .fillMaxSize()
                     .background(
-                        Brush.horizontalGradient(
-                            0f to c.card.copy(alpha = 0.20f),
-                            0.42f to c.card.copy(alpha = 0.76f),
-                            1f to c.card.copy(alpha = 0.92f),
+                        Brush.verticalGradient(
+                            0f to c.bg.copy(alpha = 0.16f),
+                            0.55f to c.bg.copy(alpha = 0.78f),
+                            1f to c.bg,
                         ),
                     ),
             )
@@ -709,7 +721,7 @@ private fun TabletPortraitHero(
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(22.dp),
+                .padding(horizontal = 24.dp, vertical = 22.dp),
             horizontalArrangement = Arrangement.spacedBy(22.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {

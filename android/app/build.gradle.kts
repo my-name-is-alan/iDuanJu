@@ -20,8 +20,8 @@ android {
         applicationId = "app.iduanju"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1645
-        versionName = "1.6.45-android"
+        versionCode = 1646
+        versionName = "1.6.46-android"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Chaquopy requires an explicit ABI list (each one costs about 17 MB): ARM by default, emulators with
         // -Pidj.abis=arm64-v8a,armeabi-v7a,x86_64. Without Python every ABI of the native dependencies is packaged.

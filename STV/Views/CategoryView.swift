@@ -86,32 +86,49 @@ struct CategoryView: View {
     // MARK: 榜单
 
     @ViewBuilder private var rankContent: some View {
+        let gutter = layout.pagePadding
         SegmentedTabs(items: HGRankGenre.allCases, selection: $genre, label: \.label, idPrefix: "category.genre")
-            .padding(.horizontal, 16).padding(.top, 22)
+            .padding(.horizontal, gutter).padding(.top, 22)
         ChipRow(items: genre.subs, selection: $sub, label: \.label, idPrefix: "category.sub")
             .padding(.top, 12)
         if let e = pager.error, pager.items.isEmpty {
             ErrorStateView(error: e) { reload() }.padding(.top, 24)
         } else {
             let items = pager.items
+            let topCount = layout.tier == .compact ? 3 : layout.posterCols
             LazyVGrid(columns: cols, spacing: 16) {
-                ForEach(Array(items.prefix(3).enumerated()), id: \.element.id) { i, s in
+                ForEach(Array(items.prefix(topCount).enumerated()), id: \.element.id) { i, s in
                     PosterCellView(series: s, rank: i + 1)
                 }
-                if items.isEmpty && pager.isLoading { skeletonCells(3) }
+                if items.isEmpty && pager.isLoading { skeletonCells(topCount) }
             }
-            .padding(.horizontal, 16).padding(.top, 18)
-            LazyVStack(spacing: 0) {
-                ForEach(Array(items.dropFirst(3).enumerated()), id: \.element.id) { i, s in
-                    VStack(spacing: 0) {
-                        if i > 0 { Hairline() }
-                        RankListRow(series: s, rank: i + 4)
+            .padding(.horizontal, gutter).padding(.top, 18)
+            let rest = Array(items.dropFirst(topCount))
+            if layout.tier == .expanded {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 24, alignment: .top), count: 2), spacing: 0) {
+                    ForEach(Array(rest.enumerated()), id: \.element.id) { i, s in
+                        VStack(spacing: 0) {
+                            if i >= 2 { Hairline() }
+                            RankListRow(series: s, rank: i + topCount + 1)
+                        }
+                        .onAppear { if i + topCount == items.count - 1, pager.hasMore, !pager.isLoading { pager.loadMore() } }
                     }
-                    .onAppear { if i + 3 == items.count - 1, pager.hasMore, !pager.isLoading { pager.loadMore() } }
                 }
+                .padding(.horizontal, gutter).padding(.top, 14)
                 footer
+            } else {
+                LazyVStack(spacing: 0) {
+                    ForEach(Array(rest.enumerated()), id: \.element.id) { i, s in
+                        VStack(spacing: 0) {
+                            if i > 0 { Hairline() }
+                            RankListRow(series: s, rank: i + topCount + 1)
+                        }
+                        .onAppear { if i + topCount == items.count - 1, pager.hasMore, !pager.isLoading { pager.loadMore() } }
+                    }
+                    footer
+                }
+                .padding(.horizontal, gutter).padding(.top, 12)
             }
-            .padding(.horizontal, 16).padding(.top, 12)
         }
     }
 
@@ -136,9 +153,9 @@ struct CategoryView: View {
                     PosterCellView(series: s, subtitle: DS.genres(s) ?? DS.heat(s))
                         .onAppear { if i == items.count - 1, pager.hasMore, !pager.isLoading { pager.loadMore() } }
                 }
-                if pager.isLoading { skeletonCells(items.isEmpty ? 6 : 3) }
+                if pager.isLoading { skeletonCells(items.isEmpty ? layout.posterCols * 2 : layout.posterCols) }
             }
-            .padding(.horizontal, 16).padding(.top, 16)
+            .padding(.horizontal, layout.pagePadding).padding(.top, 16)
             footer
         }
     }

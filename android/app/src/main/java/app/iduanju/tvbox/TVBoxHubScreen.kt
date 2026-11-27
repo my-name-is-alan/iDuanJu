@@ -70,6 +70,7 @@ import app.iduanju.ui.components.PosterArt
 import app.iduanju.ui.components.RoundIconButton
 import app.iduanju.ui.components.SectionHeader2
 import app.iduanju.ui.components.SegmentedTabs
+import app.iduanju.ui.components.SizeTier
 import app.iduanju.ui.components.StatusTone
 import app.iduanju.ui.components.ToneChip
 import app.iduanju.ui.components.dsCard
@@ -430,13 +431,37 @@ private fun LiveSection(pane: LivePane, live: TVBoxLiveRef, onPlay: (String, Int
             val target = pane.data?.list?.groups?.firstOrNull { it.name == g }
             if (target != null && pane.locked(target)) locked = target else pane.group = g
         }, modifier = Modifier.padding(vertical = 4.dp))
+        val metrics = LocalLayoutMetrics.current
+        val liveCols = when {
+            metrics.isUltra -> 3
+            metrics.tier != SizeTier.Compact -> 2
+            else -> 1
+        }
         val epg = remember(pane.data) { pane.data?.let { d -> d.ref.live.epg.isNotEmpty() || d.list.epg.isNotEmpty() || d.list.groups.any { g -> g.channels.any { it.epg.isNotEmpty() } } } == true }
         LazyColumn(Modifier.fillMaxSize(), pane.list, contentPadding = PaddingValues(bottom = DockSpace)) {
-            items(shown, key = { it.key }, contentType = { "channel" }) { row ->
-                if (epg) LaunchedEffect(row.key) { pane.nowPlaying(row) }
-                ChannelRow(row, pane.now[row.key]?.text.orEmpty(), row.channel.name in favorites, live.live.logo, onFavorite = { store.toggleFavorite(row.channel.name) }) {
-                    Catalog.rememberChannel(TVBoxId.live(pane.uid), LiveKey(row.number, row.group.name, row.channel.name, row.channel.urls.firstOrNull().orEmpty()))
-                    onPlay(TVBoxId.live(pane.uid), row.number)
+            if (liveCols > 1) {
+                val chunked = shown.chunked(liveCols)
+                items(chunked, key = { it.first().key }, contentType = { "channelRow" }) { pair ->
+                    Row(Modifier.fillMaxWidth().padding(horizontal = metrics.pagePadding - 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        pair.forEach { row ->
+                            if (epg) LaunchedEffect(row.key) { pane.nowPlaying(row) }
+                            Box(Modifier.weight(1f)) {
+                                ChannelRow(row, pane.now[row.key]?.text.orEmpty(), row.channel.name in favorites, live.live.logo, onFavorite = { store.toggleFavorite(row.channel.name) }) {
+                                    Catalog.rememberChannel(TVBoxId.live(pane.uid), LiveKey(row.number, row.group.name, row.channel.name, row.channel.urls.firstOrNull().orEmpty()))
+                                    onPlay(TVBoxId.live(pane.uid), row.number)
+                                }
+                            }
+                        }
+                        repeat(liveCols - pair.size) { Spacer(Modifier.weight(1f)) }
+                    }
+                }
+            } else {
+                items(shown, key = { it.key }, contentType = { "channel" }) { row ->
+                    if (epg) LaunchedEffect(row.key) { pane.nowPlaying(row) }
+                    ChannelRow(row, pane.now[row.key]?.text.orEmpty(), row.channel.name in favorites, live.live.logo, onFavorite = { store.toggleFavorite(row.channel.name) }) {
+                        Catalog.rememberChannel(TVBoxId.live(pane.uid), LiveKey(row.number, row.group.name, row.channel.name, row.channel.urls.firstOrNull().orEmpty()))
+                        onPlay(TVBoxId.live(pane.uid), row.number)
+                    }
                 }
             }
             item(key = "footer") {

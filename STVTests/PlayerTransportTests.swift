@@ -301,6 +301,57 @@ import AVKit
         XCTAssertEqual(requests,[false],"duplicate callback must not toggle intent")
         observer.bind(nil)
     }
+
+    func testRapidSeeksCoalesceSeriallyWithoutOverlap() async throws {
+        let e = TestPlayerEngine()
+        e.seekDelay = .milliseconds(60)
+        let co = coordinator(e)
+        defer { co.teardown() }
+        co.select(0); try await ready(co, 0)
+        XCTAssertFalse(e.isPaused)
+
+        // Rapidly tap the scrubber 5 times while the first seek is still in flight.
+        co.seek(fraction: 0.10)
+        co.seek(fraction: 0.25)
+        co.seek(fraction: 0.40)
+        co.seek(fraction: 0.65)
+        co.seek(fraction: 0.80)
+
+        try await Task.sleep(for: .milliseconds(250))
+        XCTAssertEqual(e.maxConcurrentSeeks, 1, "rapid scrubber taps must never fire overlapping core seeks")
+        XCTAssertLessThan(e.seekTargets.count, 5, "intermediate rapid taps should coalesce to the latest target")
+        XCTAssertEqual(e.seekTargets.last ?? -1, 48.0, accuracy: 0.1)
+        XCTAssertFalse(e.isPaused, "rapid seeking must leave playback running")
+        XCTAssertFalse(e.muted, "rapid seeking must not mute audio")
+    }
+
+    func testTeardownKeepsAudioSessionOwnershipWhileReplacementCoordinatorIsActive() async throws {
+        PlaybackCoordinator.activeAudioOwners.removeAll()
+        let e1 = TestPlayerEngine(); let co1 = coordinator(e1)
+        co1.select(0); try await ready(co1, 0)
+        XCTAssertEqual(PlaybackCoordinator.activeAudioOwners.count, 1)
+
+        // Replacement player starts before the outgoing player's onDisappear calls teardown().
+        let e2 = TestPlayerEngine(); let co2 = coordinator(e2)
+        co2.select(0); try await ready(co2, 0)
+        XCTAssertEqual(PlaybackCoordinator.activeAudioOwners.count, 2)
+
+        co1.teardown()
+        XCTAssertEqual(PlaybackCoordinator.activeAudioOwners.count, 1, "outgoing teardown must preserve the active player's audio session ownership")
+        XCTAssertTrue(PlaybackCoordinator.activeAudioOwners.contains(ObjectIdentifier(co2)))
+
+        co2.teardown()
+        XCTAssertTrue(PlaybackCoordinator.activeAudioOwners.isEmpty)
+    }
+
+    func testFeedDriftStaysCenteredWhenSettledEvenWithStaleOffset() {
+        // Stale feed.y = 0 when starting at episode 2 or 10 must never push videoLayer off-screen while settled.
+        XCTAssertEqual(FeedDriftMath.offset(feedY: 0, index: 1, page: 852, active: false), 0)
+        XCTAssertEqual(FeedDriftMath.offset(feedY: 0, index: 10, page: 852, active: false), 0)
+        // Active vertical swipe still follows the finger clamped to ±1 page.
+        XCTAssertEqual(FeedDriftMath.offset(feedY: 1052, index: 1, page: 852, active: true), -200)
+        XCTAssertEqual(FeedDriftMath.offset(feedY: 0, index: 5, page: 852, active: true), 852)
+    }
 }
 
 @MainActor private final class TestPlayerEngine: PlayerEngine {
@@ -341,6 +392,10 @@ import AVKit
     var lastStart: Double?
     /// Accept seeks without moving the clock (a core still fetching).
     var holdSeeks = false
+    var seekDelay: Duration = .zero
+    var activeSeeks = 0
+    var maxConcurrentSeeks = 0
+    var seekTargets: [Double] = []
     func supports(_ src: PlaybackCoordinator.Source) -> Bool { true }
     func load(_ src: PlaybackCoordinator.Source, stream: HGStream?, start: Double?, title: String) async throws {
         try await Task.sleep(for:loadDelay); isPaused = true
@@ -353,7 +408,14 @@ import AVKit
     func play(rate: Double) { isPaused = false }
     func pause() { isPaused = true; if notifyInternalPause { onPlaybackRequested?(false) } }
     func setRate(_ rate: Double) {}
-    func seek(to seconds: Double) async { if !holdSeeks { currentTime = seconds } }
+    func seek(to seconds: Double) async {
+        activeSeeks += 1
+        maxConcurrentSeeks = max(maxConcurrentSeeks, activeSeeks)
+        seekTargets.append(seconds)
+        if seekDelay > .zero { try? await Task.sleep(for: seekDelay) }
+        if !holdSeeks { currentTime = seconds }
+        activeSeeks -= 1
+    }
     func stop() { stopCount += 1; isPaused = true }
     func selectAudio(_ id: Int) {}
     func selectSubtitle(_ id: Int?) {}

@@ -25,6 +25,8 @@ import UIKit
     private let view = Surface()
     var surface: UIView { view }
     private var statusObservation: NSKeyValueObservation?
+    private var readyObservation: NSKeyValueObservation?
+    private var readyContinuation: CheckedContinuation<Void, Never>?
     private var endObserver: NSObjectProtocol?
     private var generation = 0
     private var audioGroup: AVMediaSelectionGroup?
@@ -51,8 +53,12 @@ import UIKit
         transport.acceptingRequests = false
         transport.expectPaused(true)
         statusObservation = nil
+        cancelReadyWait()
         guard let item = PlaybackCoordinator.makeItem(src, stream: stream) else { throw URLError(.badURL) }
-        awaitingFirstPlay = true
+        // Only bypass buffering prediction when starting fresh at 0; resuming at `start > 0` lets AVPlayer
+        // prime both audio and video buffers at the seek point so video never races ahead without sound.
+        awaitingFirstPlay = (start ?? 0) <= 0
+        player.volume = 1.0
         item.nowPlayingInfo = [MPMediaItemPropertyTitle: title]
         audioGroup = nil; legibleGroup = nil; audioTracks = []; subtitleTracks = []; selectedAudio = nil; selectedSubtitle = nil
         player.replaceCurrentItem(with: item)
@@ -75,11 +81,42 @@ import UIKit
             }
         }
         if let start, start > 0 {
-            await player.seek(to: CMTime(seconds: start, preferredTimescale: 600))
+            await waitForReady(item, gen: gen, timeout: 4.0)
+            guard generation == gen else { throw CancellationError() }
+            if item.status == .failed { throw item.error ?? URLError(.cannotOpenFile) }
+            let tol = CMTime(seconds: 0.25, preferredTimescale: 600)
+            _ = await player.seek(to: CMTime(seconds: start, preferredTimescale: 600), toleranceBefore: tol, toleranceAfter: tol)
         }
+        guard generation == gen else { throw CancellationError() }
         if item.status == .failed { throw item.error ?? URLError(.cannotOpenFile) }
         transport.acceptingRequests = true
         Task { [weak self] in await self?.refreshTracks(item) }
+    }
+
+    private func waitForReady(_ item: AVPlayerItem, gen: Int, timeout: Double) async {
+        guard item.status == .unknown, generation == gen else { return }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            readyContinuation = cont
+            readyObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
+                Task { @MainActor in
+                    guard let self, self.generation == gen, item.status != .unknown else { return }
+                    self.cancelReadyWait()
+                }
+            }
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(timeout))
+                guard let self, self.generation == gen else { return }
+                self.cancelReadyWait()
+            }
+        }
+    }
+
+    private func cancelReadyWait() {
+        readyObservation = nil
+        if let cont = readyContinuation {
+            readyContinuation = nil
+            cont.resume()
+        }
     }
 
     /// Set by `load`: the first play of an item starts on the first decodable data instead of waiting until
@@ -105,13 +142,16 @@ import UIKit
     }
 
     func seek(to seconds: Double) async {
-        await player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        player.volume = 1.0
+        let tol = CMTime(seconds: 0.15, preferredTimescale: 600)
+        _ = await player.seek(to: CMTime(seconds: max(0, seconds), preferredTimescale: 600), toleranceBefore: tol, toleranceAfter: tol)
     }
 
     func stop() {
         transport.acceptingRequests = false
         generation += 1
         statusObservation = nil
+        cancelReadyWait()
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         endObserver = nil
         player.pause()

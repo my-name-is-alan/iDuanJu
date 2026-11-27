@@ -7,44 +7,44 @@ struct ProfileView: View {
     @State private var refreshTick = 0
 
     @ObservedObject private var webdav = WebDAVSync.shared
+    @Environment(\.layoutMetrics) private var layout
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                Text("我的").dsFont(32, .heavy, relativeTo: .largeTitle).foregroundStyle(STVTheme.text).padding(.horizontal, 20)
+                Text("我的").dsFont(32, .heavy, relativeTo: .largeTitle).foregroundStyle(STVTheme.text)
+                    .padding(.horizontal, layout.tier == .compact ? 20 : layout.pagePadding)
                     .accessibilityAddTraits(.isHeader)
-                HongguoAccountCard(message: $message, login: $showHongguoLogin)
-                ProfileLibrary()
-                ProfileLinks(refreshTick: refreshTick)
-                DSSection(
-                    "数据备份与迁移",
-                    footer: "支持 WebDAV 多端同步进度与插件；换证书自签或换机前也可导出本地备份，退到后台会自动写入系统「文件 → 我的 iPhone → i短剧 → AutoBackup」防掉签。",
-                    separatorInset: 58
-                ) {
-                    DSLinkRow("WebDAV 多端同步", route: Route.webdav, icon: "icloud.and.arrow.up", value: webdav.statusBadge)
-                    DSRow(
-                        backupBusy == "export" ? "正在打包备份…" : "导出全量备份",
-                        icon: "square.and.arrow.up",
-                        subtitle: "插件、片源、观看历史、收藏、书源与小说"
-                    ) { Task { await exportBackup() } }
-                    DSRow(
-                        backupBusy == "import" ? "正在恢复备份…" : "从备份文件恢复",
-                        icon: "arrow.down.doc",
-                        subtitle: "导入 .idjbackup 无损合并恢复"
-                    ) { Task { await importBackup() } }
-                }
-                DSSection("维护", separatorInset: 58) {
-                    maintenance("重置红果设备注册", "arrow.counterclockwise") { await HongguoClient.shared.resetDevice(); message = "已重置红果设备" }
-                    maintenance("重置黄果访客会话", "person.badge.key") { await HuangguoClient.shared.resetSession(); message = "已清除黄果会话" }
-                    maintenance("清空封面缓存", "photo.stack") { await CoverStore.shared.clear(); message = "封面缓存已清空" }
-                    maintenance("清空播放缓存", "trash") {
-                        await Task.detached { try? FileManager.default.removeItem(at: EpisodePlaybackLoader.cacheDir) }.value
-                        await HongguoClient.shared.clearResolveCache()
-                        message = "播放缓存已清空"
+
+                if layout.tier == .expanded {
+                    HStack(alignment: .top, spacing: 24) {
+                        VStack(alignment: .leading, spacing: 22) {
+                            HongguoAccountCard(message: $message, login: $showHongguoLogin)
+                            ProfileLibrary(compactGrid: true)
+                        }
+                        .frame(minWidth: 330, idealWidth: 390, maxWidth: 430)
+
+                        VStack(alignment: .leading, spacing: 22) {
+                            ProfileLinks(refreshTick: refreshTick)
+                            backupAndMaintenance
+                            versionFooter
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    .padding(.horizontal, 12)
+                    .frame(maxWidth: 1240)
+                    .frame(maxWidth: .infinity)
+                } else {
+                    VStack(alignment: .leading, spacing: 24) {
+                        HongguoAccountCard(message: $message, login: $showHongguoLogin)
+                        ProfileLibrary()
+                        ProfileLinks(refreshTick: refreshTick)
+                        backupAndMaintenance
+                        versionFooter
+                    }
+                    .frame(maxWidth: layout.tier == .medium ? 740 : .infinity)
+                    .frame(maxWidth: .infinity)
                 }
-                Text("所有数据由本机直连上游，观看记录和收藏只保存在本机。\n\(Self.versionText)")
-                    .dsFont(12, relativeTo: .caption).foregroundStyle(STVTheme.tertiary).lineSpacing(3).padding(.horizontal, 20)
             }
             .padding(.top, 8).padding(.bottom, 24)
             .compatScrollContent()
@@ -55,6 +55,41 @@ struct ProfileView: View {
         .toolbar(.hidden, for: .navigationBar)
         .sheet(isPresented: $showHongguoLogin) { HongguoLoginView() }
         .dsToast($message, icon: "checkmark.circle.fill", bottom: 16)
+    }
+
+    @ViewBuilder private var backupAndMaintenance: some View {
+        DSSection(
+            "数据备份与迁移",
+            footer: "支持 WebDAV 多端同步进度与插件；换证书自签或换机前也可导出本地备份，退到后台会自动写入系统「文件 → 我的 iPhone → i短剧 → AutoBackup」防掉签。",
+            separatorInset: 58
+        ) {
+            DSLinkRow("WebDAV 多端同步", route: Route.webdav, icon: "icloud.and.arrow.up", value: webdav.statusBadge)
+            DSRow(
+                backupBusy == "export" ? "正在打包备份…" : "导出全量备份",
+                icon: "square.and.arrow.up",
+                subtitle: "插件、片源、观看历史、收藏、书源与小说"
+            ) { Task { await exportBackup() } }
+            DSRow(
+                backupBusy == "import" ? "正在恢复备份…" : "从备份文件恢复",
+                icon: "arrow.down.doc",
+                subtitle: "导入 .idjbackup 无损合并恢复"
+            ) { Task { await importBackup() } }
+        }
+        DSSection("维护", separatorInset: 58) {
+            maintenance("重置红果设备注册", "arrow.counterclockwise") { await HongguoClient.shared.resetDevice(); message = "已重置红果设备" }
+            maintenance("重置黄果访客会话", "person.badge.key") { await HuangguoClient.shared.resetSession(); message = "已清除黄果会话" }
+            maintenance("清空封面缓存", "photo.stack") { await CoverStore.shared.clear(); message = "封面缓存已清空" }
+            maintenance("清空播放缓存", "trash") {
+                await Task.detached { try? FileManager.default.removeItem(at: EpisodePlaybackLoader.cacheDir) }.value
+                await HongguoClient.shared.clearResolveCache()
+                message = "播放缓存已清空"
+            }
+        }
+    }
+
+    private var versionFooter: some View {
+        Text("所有数据由本机直连上游，观看记录和收藏只保存在本机。\n\(Self.versionText)")
+            .dsFont(12, relativeTo: .caption).foregroundStyle(STVTheme.tertiary).lineSpacing(3).padding(.horizontal, 20)
     }
 
     static var versionText: String {
@@ -144,13 +179,16 @@ private struct HongguoAccountCard: View {
 }
 
 private struct ProfileLibrary: View {
+    var compactGrid = false
     @ObservedObject private var library = LibraryStore.shared
     @Environment(\.layoutMetrics) private var layout
     var body: some View {
         let watching = Array(library.continueWatching.prefix(10)), favorites = library.favorites
         let preview = Array(favorites.prefix(6))
         let landscape = preview.first?.isLandscapeCover ?? false
-        let cols = landscape ? layout.wideGridItems(spacing: 10) : layout.posterGridItems(spacing: 10)
+        let cols: [GridItem] = compactGrid
+            ? Array(repeating: GridItem(.flexible(), spacing: 10, alignment: .top), count: landscape ? 2 : 3)
+            : (landscape ? layout.wideGridItems(spacing: 10) : layout.posterGridItems(spacing: 10))
         if !watching.isEmpty { ContinueRow(items: watching) }
         VStack(alignment: .leading, spacing: 12) {
             SectionHeader(title: "我的收藏") {

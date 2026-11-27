@@ -211,36 +211,59 @@ struct DramaDetailView: View {
     }
 
     private func twoPane(_ d: HGSeriesDetail) -> some View {
-        HStack(alignment: .top, spacing: 28) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    CoverView(url: cover, corner: 20, maxPixelSize: CoverPixels.hero, fallback: series.cover)
-                        .aspectRatio(series.isLandscapeCover ? 16 / 9 : 3 / 4, contentMode: .fit)
-                        .frame(maxHeight: 420)
-                        .modifier(PosterLift(corner: 20))
-                    DetailSourceBadge(text: series.source.label)
-                    Text(title).dsFont(24, .heavy, relativeTo: .title).foregroundStyle(STVTheme.text)
-                    if !heroMeta.isEmpty { Text(heroMeta).dsFont(13, relativeTo: .footnote).foregroundStyle(STVTheme.secondary) }
-                    DetailInlineStats(detail: d)
-                    HStack(spacing: 10) {
-                        DetailPlayButton(series: series, multi: episodes(d).count > 1, height: 48, enabled: !d.episodes.isEmpty)
-                        DetailHeart(series: series, size: 48)
-                    }
-                    .padding(.top, 2)
-                }
-                .padding(.bottom, 32)
-            }
-            .scrollIndicators(.hidden)
-            .frame(width: 340)
+        ZStack {
+            // Ambient Glass Stage: soft optical poster halo washing seamlessly into the page ground.
+            CoverBackdrop(url: cover, fallback: series.cover)
+                .opacity(0.24)
+                .overlay(
+                    LinearGradient(
+                        stops: [
+                            .init(color: STVTheme.bg.opacity(0.32), location: 0),
+                            .init(color: STVTheme.bg.opacity(0.84), location: 0.58),
+                            .init(color: STVTheme.bg, location: 1),
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
 
-            ScrollView { detailBody(d, showActions: false).padding(.bottom, 48) }
-                .scrollIndicators(.hidden)
-                .frame(maxWidth: .infinity)
+            GeometryReader { geo in
+                let maxW = min(geo.size.width, layout.detailMaxWidth ?? 1240)
+                let leftW = min(max(maxW * 0.36, 330), 420)
+                HStack(alignment: .top, spacing: 34) {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 14) {
+                            CoverView(url: cover, corner: 20, maxPixelSize: CoverPixels.hero, fallback: series.cover, a11yID: "detail.poster")
+                                .aspectRatio(series.isLandscapeCover ? 16 / 9 : 3 / 4, contentMode: .fit)
+                                .frame(maxHeight: 430)
+                                .modifier(PosterLift(corner: 20))
+                            DetailSourceBadge(text: series.source.label)
+                            Text(title).dsFont(26, .heavy, relativeTo: .title).foregroundStyle(STVTheme.text)
+                            if !heroMeta.isEmpty { Text(heroMeta).dsFont(13.5, relativeTo: .footnote).foregroundStyle(STVTheme.secondary) }
+                            DetailInlineStats(detail: d)
+                            HStack(spacing: 10) {
+                                DetailPlayButton(series: series, multi: episodes(d).count > 1, height: 48, id: "detail.play", enabled: !d.episodes.isEmpty)
+                                DetailHeart(series: series, size: 48, id: "detail.favorite")
+                            }
+                            .padding(.top, 4)
+                        }
+                        .padding(.bottom, 36)
+                    }
+                    .scrollIndicators(.hidden)
+                    .frame(width: leftW)
+
+                    ScrollView { detailBody(d, showActions: false).padding(.bottom, 52) }
+                        .scrollIndicators(.hidden)
+                        .frame(maxWidth: .infinity)
+                }
+                .padding(.top, 70)
+                .padding(.horizontal, layout.pagePadding)
+                .frame(maxWidth: layout.detailMaxWidth ?? 1240)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
-        .padding(.top, 72)
-        .padding(.horizontal, 28)
-        .frame(maxWidth: 1160)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Nav + Sticky Play Bar
@@ -438,7 +461,6 @@ struct DramaDetailView: View {
         HStack(alignment: .center, spacing: 22) {
             CoverView(url: cover, corner: 16, maxPixelSize: CoverPixels.wide, fallback: series.cover, a11yID: "detail.poster")
                 .frame(width: 172, height: 230)
-                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(.white.opacity(0.16), lineWidth: 0.8))
                 .modifier(PosterLift(corner: 16))
 
             VStack(alignment: .leading, spacing: 10) {
@@ -454,16 +476,13 @@ struct DramaDetailView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(22)
+        .padding(.horizontal, layout.pagePadding)
+        .padding(.vertical, 22)
         .background {
-            CoverBackdrop(url: cover, fallback: series.cover).opacity(0.32)
-                .overlay(LinearGradient(stops: [.init(color: STVTheme.surface.opacity(0.22), location: 0), .init(color: STVTheme.surface.opacity(0.78), location: 0.44),
-                                               .init(color: STVTheme.surface.opacity(0.94), location: 1)], startPoint: .leading, endPoint: .trailing))
+            CoverBackdrop(url: cover, fallback: series.cover).opacity(0.26)
+                .overlay(LinearGradient(stops: [.init(color: STVTheme.bg.opacity(0.18), location: 0), .init(color: STVTheme.bg.opacity(0.76), location: 0.56),
+                                               .init(color: STVTheme.bg, location: 1)], startPoint: .top, endPoint: .bottom))
         }
-        .background(STVTheme.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous).strokeBorder(STVTheme.hairline, lineWidth: 1))
-        .padding(.horizontal, 20)
     }
 
     // MARK: - Body
@@ -1055,25 +1074,21 @@ private struct DetailPlayButton: View {
             .padding(.horizontal, 22)
             .frame(maxWidth: expand ? .infinity : nil)
             .frame(height: height)
-            .background(Capsule().fill(STVTheme.text))
-            .overlay(alignment: .bottom) {
+            .background(STVTheme.text)
+            .overlay(alignment: .bottomLeading) {
                 if frac > 0.02 {
                     GeometryReader { geo in
-                        let trackW = max(0, geo.size.width - 44)
-                        Capsule()
-                            .fill(STVTheme.bg.opacity(0.22))
-                            .frame(width: trackW, height: 2.5)
-                            .overlay(alignment: .leading) {
-                                Capsule()
-                                    .fill(STVTheme.accent)
-                                    .frame(width: trackW * min(1, max(0, frac)), height: 2.5)
-                            }
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                            .padding(.bottom, 5)
+                        ZStack(alignment: .leading) {
+                            Color(red: 0.157, green: 0.427, blue: 0.937).opacity(0.20)
+                            Color(red: 0.157, green: 0.427, blue: 0.937)
+                                .frame(width: geo.size.width * min(1, max(0.06, frac)))
+                        }
                     }
+                    .frame(height: 3.5)
                     .allowsHitTesting(false)
                 }
             }
+            .clipShape(Capsule())
             .shadow(color: STVTheme.barShadow, radius: floating ? 12 : 6, y: floating ? 5 : 3)
             .contentShape(Capsule())
         }

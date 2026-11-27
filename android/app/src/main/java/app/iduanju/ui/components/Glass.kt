@@ -25,6 +25,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -554,11 +555,9 @@ fun GlassTabBar(
 }
 
 /**
- * Vertical floating glass navigation rail for Expanded tablet / desktop widths (>= 840dp).
+ * Vertical floating 72 dp Liquid Glass navigation rail for Expanded tablet / desktop widths (>= 840dp).
  *
- * 84 dp slot = 8 dp gutters + a 68 dp glass column. The search button sits at the same height as the pages' 46 dp
- * top search capsule (status bar + 6 dp), the tab column is vertically centred in the remaining height, and the
- * active tab gets a crisp 48×30 pill behind its icon (Material 3 rail indicator) plus a semibold label.
+ * 72 dp slot = 8 dp gutters + a 56 dp glass pill column + independent 48 dp circular search button at top.
  */
 @Composable
 fun GlassNavigationRail(
@@ -575,19 +574,20 @@ fun GlassNavigationRail(
     val liquid = GlassStylePref.style == GlassStyle.LIQUID
     Column(
         modifier
-            .width(84.dp)
+            .width(72.dp)
             .fillMaxHeight()
             .statusBarsPadding()
             .navigationBarsPadding()
-            .padding(top = 6.dp, bottom = 16.dp, start = 8.dp, end = 8.dp),
+            .padding(top = 10.dp, bottom = 14.dp, start = 12.dp, end = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         if (onSearch != null && searchIcon != null) {
             Box(
                 Modifier
-                    .size(56.dp, 46.dp)
+                    .size(48.dp)
+                    .testTag("home.search")
                     .glassSurface(
-                        shape = PillShape,
+                        shape = CircleShape,
                         backdrop = backdrop,
                         shadowRadius = 14.dp,
                         activeOverlay = if (searchSelected) c.accent.copy(alpha = if (c.dark) 0.16f else 0.12f) else Color.Transparent,
@@ -601,9 +601,9 @@ fun GlassNavigationRail(
         Spacer(Modifier.weight(1f))
         Column(
             Modifier
-                .width(68.dp)
-                .glassSurface(shape = RailShape, backdrop = backdrop, shadowRadius = 14.dp, veil = dockVeil())
-                .padding(vertical = 10.dp, horizontal = 4.dp),
+                .width(56.dp)
+                .glassSurface(shape = RoundedCornerShape(30.dp), backdrop = backdrop, shadowRadius = 14.dp, veil = dockVeil())
+                .padding(vertical = 8.dp, horizontal = 4.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
@@ -613,13 +613,13 @@ fun GlassNavigationRail(
                 Column(
                     Modifier
                         .fillMaxWidth()
-                        .height(60.dp)
+                        .height(54.dp)
                         .clip(RoundedCornerShape(18.dp))
                         .clickable { onSelect(i) },
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center,
                 ) {
-                    Box(Modifier.size(48.dp, 30.dp), contentAlignment = Alignment.Center) {
+                    Box(Modifier.size(42.dp, 28.dp), contentAlignment = Alignment.Center) {
                         Box(
                             Modifier
                                 .matchParentSize()
@@ -631,12 +631,12 @@ fun GlassNavigationRail(
                         )
                         icon(on)
                     }
-                    Spacer(Modifier.height(3.dp))
+                    Spacer(Modifier.height(2.dp))
                     Text(
                         label,
                         color = if (on) c.text else dockLabel(),
-                        fontSize = 11.sp,
-                        lineHeight = 13.sp,
+                        fontSize = 10.5.sp,
+                        lineHeight = 12.sp,
                         maxLines = 1,
                         fontWeight = if (on) FontWeight.SemiBold else FontWeight.Medium,
                     )
@@ -644,8 +644,7 @@ fun GlassNavigationRail(
             }
         }
         Spacer(Modifier.weight(1f))
-        // Keep the tab column optically centred under the search button.
-        Spacer(Modifier.height(46.dp))
+        if (onSearch != null) Spacer(Modifier.height(48.dp))
     }
 }
 

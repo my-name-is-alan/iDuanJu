@@ -230,6 +230,7 @@ struct HomeView: View {
     @State private var safeSpan: VSpan?
     @State private var showChannels = false
     @State private var reorderingSources = false
+    @Environment(\.layoutMetrics) private var layout
     private var rest: VSpan? {
         guard let h = headerSpan, let s = safeSpan else { return nil }
         return VSpan(top: h.bottom, bottom: s.bottom)
@@ -379,29 +380,47 @@ struct HomeView: View {
 
     private var header: some View {
         VStack(spacing: 0) {
-            LiquidGlassGroup(spacing: 10) {
-                HStack(spacing: 10) {
-                    NavigationLink(value: Route.searchFromSource(activeSearchSource)) {
-                        DSSearchBarLabel()
-                            .padding(.horizontal, 16).frame(height: 46).contentShape(Capsule())
-                            .liquidGlassCapsule(interactive: true)
-                    }
-                    .buttonStyle(GlassPress()).accessibilityLabel("搜索").accessibilityIdentifier("home.search")
+            if layout.useRail {
+                HStack(spacing: 12) {
+                    HomeChannelBar(items: sources, selection: $source, label: \.label, ink: STVTheme.text, horizontalPadding: layout.pagePadding)
                     Button { showChannels = true } label: {
                         HStack(spacing: 5) {
-                            Image(systemName: "line.3.horizontal.decrease").font(.system(size: 14, weight: .semibold))
+                            Image(systemName: "line.3.horizontal.decrease").font(.system(size: 13, weight: .semibold))
                             Text("筛选").font(.system(size: 14, weight: .medium))
                         }
                         .foregroundStyle(STVTheme.text)
-                        .padding(.horizontal, 16).frame(height: 46).contentShape(Capsule())
+                        .padding(.horizontal, 14).frame(height: 38).contentShape(Capsule())
                         .liquidGlassCapsule(interactive: true)
                     }
                     .buttonStyle(GlassPress()).accessibilityLabel("筛选与全部频道").accessibilityIdentifier("home.filter")
+                    .padding(.trailing, layout.pagePadding)
                 }
+                .padding(.top, 6)
+            } else {
+                LiquidGlassGroup(spacing: 10) {
+                    HStack(spacing: 10) {
+                        NavigationLink(value: Route.searchFromSource(activeSearchSource)) {
+                            DSSearchBarLabel()
+                                .padding(.horizontal, 16).frame(height: 46).contentShape(Capsule())
+                                .liquidGlassCapsule(interactive: true)
+                        }
+                        .buttonStyle(GlassPress()).accessibilityLabel("搜索").accessibilityIdentifier("home.search")
+                        Button { showChannels = true } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "line.3.horizontal.decrease").font(.system(size: 14, weight: .semibold))
+                                Text("筛选").font(.system(size: 14, weight: .medium))
+                            }
+                            .foregroundStyle(STVTheme.text)
+                            .padding(.horizontal, 16).frame(height: 46).contentShape(Capsule())
+                            .liquidGlassCapsule(interactive: true)
+                        }
+                        .buttonStyle(GlassPress()).accessibilityLabel("筛选与全部频道").accessibilityIdentifier("home.filter")
+                    }
+                }
+                .padding(.horizontal, layout.pagePadding)
+                HomeChannelBar(items: sources, selection: $source, label: \.label, ink: STVTheme.text, horizontalPadding: layout.pagePadding)
+                    .padding(.top, 12)
             }
-            .padding(.horizontal, 16)
-            HomeChannelBar(items: sources, selection: $source, label: \.label, ink: STVTheme.text)
-                .padding(.top, 12)
         }
         .padding(.top, 8)
         .padding(.bottom, 8)
@@ -615,7 +634,8 @@ private struct HomeFeedPage: View {
     @Binding var tab: HomeTab
     @State private var legacyChannels: [HuangguoChannel] = []
     @State private var legacyError: Error?
-    private let gutter: CGFloat = 16
+    @Environment(\.layoutMetrics) private var layout
+    private var gutter: CGFloat { layout.pagePadding }
     /// DEBUG `STV_HOME_SCROLL=bottom` opens the feed scrolled to the end (simulator screenshots).
     private static var debugAnchor: UnitPoint? {
         #if DEBUG
@@ -724,15 +744,19 @@ private struct HomeHeroSection: View {
     @ObservedObject var feed: BoardFeed
     let board: BoardSpec
     @State private var index = 0
+    @Environment(\.layoutMetrics) private var layout
     var body: some View {
         let picks = Array(feed.items.prefix(Self.count))
+        let gutter = layout.pagePadding
+        let skelH: CGFloat = layout.tier == .expanded ? 286 : (layout.tier == .medium ? 228 : 177)
         Group {
             if !picks.isEmpty {
                 PosterHero(board: board.title, picks: picks, index: $index)
-                    .padding(.horizontal, 16).padding(.top, 16)
+                    .padding(.horizontal, gutter).padding(.top, layout.useRail ? 10 : 16)
                     .transition(.opacity)
             } else if feed.error == nil {
-                ShimmerBlock(corner: 22).frame(height: 177).padding(.horizontal, 16).padding(.top, 16)
+                ShimmerBlock(corner: layout.tier == .compact ? 22 : 24).frame(height: skelH)
+                    .padding(.horizontal, gutter).padding(.top, layout.useRail ? 10 : 16)
             }
         }
         .animation(.easeOut(duration: 0.25), value: picks.isEmpty)
@@ -758,6 +782,7 @@ private struct HomeBoardSection: View {
     let landscape: Bool
     let reloadAll: () -> Void
     @State private var verify: VerifyTarget?
+    @Environment(\.layoutMetrics) private var layout
 
     var body: some View {
         Group {
@@ -774,16 +799,27 @@ private struct HomeBoardSection: View {
                             Button { feed.load(force: true) } label: { MiniButtonLabel(title: "重试") }
                         }
                         .buttonStyle(PressScale())
-                        .padding(.horizontal, 16)
+                        .padding(.horizontal, layout.pagePadding)
                     }
                 }
             } else if case .loaded(let items) = feed.state {
-                // 第一个榜单一律跳过 hero 里已展示的剧（数据不够时也跳过，只剩标题和「全部」）。
-                HomeShelf(title: board.title, note: nil, items: Array(items.dropFirst(skip).prefix(12)), more: board)
+                // 第一个榜单一律跳过 hero 里已展示的剧；平板端首榜展开为无框 4/5/6 列整行海报矩阵，避免第二行大面积空位。
+                let isTabletMatrix = layout.tier != .compact && skip > 0 && !landscape
+                let rem = Array(items.dropFirst(skip))
+                let shown: [HGSeries] = {
+                    if isTabletMatrix {
+                        let cols = layout.posterCols
+                        let fullRows = (rem.count / cols) * cols
+                        let count = fullRows > 0 ? min(fullRows, cols * 2) : cols
+                        return Array(rem.prefix(count))
+                    }
+                    return Array(rem.prefix(layout.tier == .compact ? 12 : 16))
+                }()
+                HomeShelf(title: board.title, note: nil, items: shown, more: board, gridOnTablet: isTabletMatrix)
             } else {
                 VStack(alignment: .leading, spacing: 12) {
-                    DSSectionHeader(title: board.title)
-                    HomeCardsSkeleton(landscape: landscape).padding(.horizontal, 16)
+                    DSSectionHeader(title: board.title, inset: layout.pagePadding)
+                    HomeCardsSkeleton(landscape: landscape).padding(.horizontal, layout.pagePadding)
                 }
             }
         }
@@ -949,6 +985,7 @@ struct HomeChannelBar<T: Hashable>: View {
     @Binding var selection: T
     let label: (T) -> String
     var ink: Color = .white
+    var horizontalPadding: CGFloat = 20
     @Namespace private var ns
     var body: some View {
         ScrollViewReader { proxy in
@@ -966,7 +1003,7 @@ struct HomeChannelBar<T: Hashable>: View {
                             .accessibilityAddTraits(on ? .isSelected : [])
                     }
                 }
-                .padding(.horizontal, 20)
+                .padding(.horizontal, horizontalPadding)
                 .animation(DS.select, value: selection)
                 .animation(DS.select, value: items)
             }
@@ -986,15 +1023,27 @@ struct HomeChannelBar<T: Hashable>: View {
 /// 长视频站点（横版封面）同一布局里海报区按 16:9 显示在上方。
 private struct PosterHero: View {
     @Environment(\.zoomNS) private var ns
+    @Environment(\.layoutMetrics) private var layout
+    @ObservedObject private var library = LibraryStore.shared
     let board: String
     let picks: [HGSeries]
     @Binding var index: Int
 
+    private var isTablet: Bool { layout.tier != .compact }
+    private var corner: CGFloat { isTablet ? 24 : 22 }
+
     var body: some View {
         TabView(selection: $index) {
             ForEach(Array(picks.enumerated()), id: \.element.id) { i, s in
-                NavigationLink(value: Route.series(s)) { page(s, rank: i + 1) }.buttonStyle(.plain).tag(i)
-                    .accessibilityIdentifier("home.hero.page.\(i)")
+                Group {
+                    if isTablet {
+                        tabletPage(s, rank: i + 1)
+                    } else {
+                        NavigationLink(value: Route.series(s)) { page(s, rank: i + 1) }.buttonStyle(.plain)
+                    }
+                }
+                .tag(i)
+                .accessibilityIdentifier("home.hero.page.\(i)")
             }
         }
         .tabViewStyle(.page(indexDisplayMode: .never))
@@ -1002,9 +1051,9 @@ private struct PosterHero: View {
         .frame(height: height)
         .background { backdrop }
         .overlay(alignment: .bottomTrailing) { dots }
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        // Shadow of a plain shape behind the card: on the card itself it re-rendered the whole pager off screen per frame.
-        .background { RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Color.black.shadow(.drop(color: .black.opacity(0.22), radius: 15, y: 14))).padding(1) }
+        .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+        // Shadow of a plain shape behind the card: radius stays inside horizontal pagePadding so the pager never clips it.
+        .background { RoundedRectangle(cornerRadius: corner, style: .continuous).fill(Color.black.shadow(.drop(color: .black.opacity(isTablet ? 0.20 : 0.22), radius: isTablet ? 14 : 15, y: isTablet ? 8 : 14))).padding(1) }
         // Auto-advance; the timer restarts on every page change, so a manual swipe gets a full 6 s.
         .task(id: "\(picks.count)-\(index)") {
             guard picks.count > 1, Self.autoAdvance else { return }
@@ -1019,7 +1068,11 @@ private struct PosterHero: View {
     private static let posterHeight: CGFloat = 112 * 4 / 3
     private static let landscapeHeight: CGFloat = pad + 99 + pad + 62
     private static let portraitHeight: CGFloat = pad + posterHeight + pad
-    private var height: CGFloat { landscape ? Self.landscapeHeight : Self.portraitHeight }
+    private var height: CGFloat {
+        if layout.tier == .expanded { return 286 }
+        if layout.tier == .medium { return 228 }
+        return landscape ? Self.landscapeHeight : Self.portraitHeight
+    }
     /// DEBUG `STV_HERO_STILL=1` (UI tests) disables auto-advance so taps never race a page change.
     static var autoAdvance: Bool {
         #if DEBUG
@@ -1029,18 +1082,134 @@ private struct PosterHero: View {
     }
     private var landscape: Bool { picks.first?.isLandscapeCover ?? false }
 
-    /// Poster colours: the current cover blurred, darkened toward the bottom-right like the spec's gradient card.
+    /// Poster colours: the current cover blurred + 3-layer cinema vignette scrim.
     private var backdrop: some View {
         let url = picks.indices.contains(index) ? picks[index].cover : ""
         return ZStack {
-            Color(red: 0.14, green: 0.10, blue: 0.10)
-            CoverBackdrop(url: url).opacity(0.9)
-            LinearGradient(colors: [.black.opacity(0.18), .black.opacity(0.62)], startPoint: .topLeading, endPoint: .bottomTrailing)
+            Color(red: 0.09, green: 0.10, blue: 0.12)
+            CoverBackdrop(url: url).opacity(isTablet ? 0.92 : 0.90)
+            LinearGradient(
+                stops: [
+                    .init(color: .black.opacity(isTablet ? 0.16 : 0.18), location: 0),
+                    .init(color: .black.opacity(isTablet ? 0.42 : 0.45), location: 0.55),
+                    .init(color: .black.opacity(isTablet ? 0.76 : 0.62), location: 1),
+                ],
+                startPoint: .topTrailing,
+                endPoint: .bottomLeading
+            )
         }
         .allowsHitTesting(false)
     }
 
     private func kicker(_ rank: Int) -> String { board.isEmpty ? "TOP \(rank)" : "\(board) · TOP \(rank)" }
+
+    /// Ambient Glass Stage cinema hero for Medium / Expanded / Ultra tablets.
+    private func tabletPage(_ s: HGSeries, rank: Int) -> some View {
+        let prog = library.progress(for: s)
+        let fav = library.isFavorite(s)
+        let expanded = layout.tier == .expanded
+        let posterW: CGFloat = landscape ? (expanded ? 320 : 230) : (expanded ? 168 : 132)
+        let posterH: CGFloat = landscape ? posterW * 9 / 16 : posterW * 4 / 3
+        let playTitle: String = {
+            if let p = prog { return "继续第 \(p.episodeNumber) 集" }
+            return "立即播放"
+        }()
+
+        return HStack(alignment: .center, spacing: expanded ? 28 : 20) {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(kicker(rank))
+                    .font(.system(size: 12, weight: .heavy)).tracking(0.6)
+                    .foregroundStyle(Color(red: 0.949, green: 0.710, blue: 0.361))
+                    .lineLimit(1)
+                Text(s.title)
+                    .font(.system(size: expanded ? 28 : 23, weight: .bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 8)
+                let heatText = s.playCount > 0 ? DS.count(s.playCount) + (s.playCount < 10_000 ? " 热度" : "热度") : nil
+                let meta = [DS.genres(s), DS.episodes(s), heatText]
+                    .compactMap { $0 }.joined(separator: " · ")
+                if !meta.isEmpty {
+                    Text(meta)
+                        .font(.system(size: 13.5, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.78))
+                        .lineLimit(1)
+                        .padding(.top, 8)
+                }
+                if !s.actors.isEmpty {
+                    Text("主演 " + s.actors.prefix(4).joined(separator: " / "))
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(.white.opacity(0.62))
+                        .lineLimit(1)
+                        .padding(.top, 4)
+                }
+                Spacer(minLength: 14)
+                HStack(spacing: 10) {
+                    NavigationLink(value: Route.play(s, prog?.episodeIndex ?? 0)) {
+                        HStack(spacing: 7) {
+                            Image(systemName: "play.fill").font(.system(size: 13, weight: .bold))
+                            Text(playTitle).font(.system(size: 14.5, weight: .semibold))
+                        }
+                        .foregroundStyle(Color(red: 0.067, green: 0.075, blue: 0.090))
+                        .padding(.horizontal, 22)
+                        .frame(height: 44)
+                        .background(Color.white.opacity(0.97))
+                        .overlay(alignment: .bottomLeading) {
+                            if let p = prog, p.fraction > 0.01 {
+                                GeometryReader { g in
+                                    ZStack(alignment: .leading) {
+                                        Color(red: 0.157, green: 0.427, blue: 0.937).opacity(0.18)
+                                        Color(red: 0.157, green: 0.427, blue: 0.937)
+                                            .frame(width: g.size.width * CGFloat(min(max(p.fraction, 0.06), 1)))
+                                    }
+                                }
+                                .frame(height: 4)
+                            }
+                        }
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(PressScale(scale: 0.97))
+                    .accessibilityLabel(playTitle)
+
+                    NavigationLink(value: Route.series(s)) {
+                        Text("详情")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 18)
+                            .frame(height: 44)
+                            .liquidGlassCapsule(tone: .clear, interactive: true, onMedia: true)
+                    }
+                    .buttonStyle(PressScale(scale: 0.96))
+
+                    Button { DS.tick(); library.toggleFavorite(s) } label: {
+                        Image(systemName: fav ? "heart.fill" : "heart")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(fav ? STVTheme.favorite : .white)
+                            .frame(width: 44, height: 44)
+                            .liquidGlass(Circle(), tone: .clear, interactive: true, onMedia: true)
+                    }
+                    .buttonStyle(PressScale(scale: 0.92))
+                    .accessibilityLabel(fav ? "取消收藏" : "收藏")
+                }
+            }
+            .frame(maxWidth: 540, maxHeight: .infinity, alignment: .leading)
+
+            Spacer(minLength: 8)
+
+            NavigationLink(value: Route.series(s)) {
+                CoverView(url: s.cover, corner: 16, maxPixelSize: landscape ? CoverPixels.wide : CoverPixels.poster)
+                    .frame(width: posterW, height: posterH)
+                    .shadow(color: .black.opacity(0.42), radius: 18, y: 10)
+                    .zoomSource(s.id, ns)
+                    .accessibilityIdentifier("home.hero.cover")
+            }
+            .buttonStyle(PressScale(scale: 0.98))
+        }
+        .padding(.horizontal, expanded ? 30 : 22)
+        .padding(.vertical, expanded ? 24 : 18)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
 
     @ViewBuilder private func page(_ s: HGSeries, rank: Int) -> some View {
         if landscape {
@@ -1122,7 +1291,7 @@ private struct PosterHero: View {
             }
         }
         .animation(DS.select, value: index)
-        .padding(.trailing, 14).padding(.bottom, 14 + 1 + 13.5)
+        .padding(.trailing, isTablet ? 28 : 14).padding(.bottom, isTablet ? 18 : 14 + 1 + 13.5)
         .opacity(picks.count > 1 ? 1 : 0)
         .allowsHitTesting(false)
         .accessibilityElement(children: .ignore)
@@ -1131,32 +1300,117 @@ private struct PosterHero: View {
     }
 }
 
-/// ui-redesign 10 `.cw`: horizontal 继续观看 cards with progress and a round play button.
+/// ui-redesign 10 `.cw`: horizontal 继续观看 cards on phones; equal-width 4-col (Expanded) / 2-col (Medium)
+/// frameless cinema grid on tablets so the right edge stays 0px flush with the poster matrix below.
 struct HomeContinueRow: View {
     @Environment(\.zoomNS) private var ns
+    @Environment(\.layoutMetrics) private var layout
     let items: [WatchProgress]
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            DSSectionHeader(title: "继续观看") {
+            DSSectionHeader(title: "继续观看", inset: layout.pagePadding) {
                 NavigationLink(value: Route.history) { MoreLabel() }.buttonStyle(.plain).accessibilityIdentifier("home.more.继续观看")
             }
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 10) {
-                    ForEach(items) { p in
-                        ZStack(alignment: .trailing) {
-                            NavigationLink(value: Route.series(p.series)) { card(p) }
-                                .buttonStyle(PressScale(scale: 0.98))
-                                .contextMenu { Button("删除观看记录", systemImage: "trash", role: .destructive) { LibraryStore.shared.removeProgress(p.series) } }
-                            NavigationLink(value: Route.play(p.series, p.episodeIndex)) { playButton }
-                                .buttonStyle(PressScale()).padding(.trailing, 12)
-                                .accessibilityLabel("继续播放 \(p.series.title)")
-                        }
+            if layout.continueGridCols > 0 {
+                let cols = Array(repeating: GridItem(.flexible(), spacing: 14, alignment: .top), count: layout.continueGridCols)
+                LazyVGrid(columns: cols, spacing: 14) {
+                    ForEach(Array(items.prefix(layout.continueGridCols))) { p in
+                        tabletContinueCard(p)
                     }
                 }
-                .padding(.horizontal, 16).padding(.vertical, 2)
+                .padding(.horizontal, layout.pagePadding)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    LazyHStack(spacing: 10) {
+                        ForEach(items) { p in
+                            ZStack(alignment: .trailing) {
+                                NavigationLink(value: Route.series(p.series)) { card(p) }
+                                    .buttonStyle(PressScale(scale: 0.98))
+                                    .contextMenu { Button("删除观看记录", systemImage: "trash", role: .destructive) { LibraryStore.shared.removeProgress(p.series) } }
+                                NavigationLink(value: Route.play(p.series, p.episodeIndex)) { playButton }
+                                    .buttonStyle(PressScale()).padding(.trailing, 12)
+                                    .accessibilityLabel("继续播放 \(p.series.title)")
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 16).padding(.vertical, 2)
+                }
+                .frame(height: 94)
+                .compatScrollBounceBasedOnSize(axes: .horizontal)
             }
-            .frame(height: 94)
-            .compatScrollBounceBasedOnSize(axes: .horizontal)
+        }
+    }
+
+    private func tabletContinueCard(_ p: WatchProgress) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ZStack(alignment: .bottomTrailing) {
+                NavigationLink(value: Route.series(p.series)) {
+                    Color.clear
+                        .aspectRatio(16 / 9, contentMode: .fit)
+                        .overlay {
+                            if p.series.cover.isEmpty {
+                                ZStack {
+                                    LinearGradient(
+                                        colors: [Color(red: 0.14, green: 0.16, blue: 0.21), Color(red: 0.08, green: 0.09, blue: 0.12)],
+                                        startPoint: .topLeading, endPoint: .bottomTrailing
+                                    )
+                                    Image(systemName: "film")
+                                        .font(.system(size: 24, weight: .light))
+                                        .foregroundStyle(.white.opacity(0.30))
+                                }
+                            } else {
+                                CoverView(url: p.series.cover, corner: 0, maxPixelSize: CoverPixels.wide)
+                                    .zoomSource(p.series.id, ns)
+                            }
+                        }
+                        .overlay {
+                            LinearGradient(
+                                stops: [
+                                    .init(color: .black.opacity(0.04), location: 0),
+                                    .init(color: .black.opacity(0.20), location: 0.54),
+                                    .init(color: .black.opacity(0.68), location: 1),
+                                ],
+                                startPoint: .top, endPoint: .bottom
+                            )
+                        }
+                        .overlay(alignment: .bottomLeading) {
+                            GeometryReader { g in
+                                ZStack(alignment: .leading) {
+                                    Color.white.opacity(0.22)
+                                    STVTheme.accent.frame(width: g.size.width * CGFloat(min(max(p.fraction, 0.04), 1)))
+                                }
+                            }
+                            .frame(height: 3)
+                        }
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+                .buttonStyle(PressScale(scale: 0.98))
+                .contextMenu { Button("删除观看记录", systemImage: "trash", role: .destructive) { LibraryStore.shared.removeProgress(p.series) } }
+
+                NavigationLink(value: Route.play(p.series, p.episodeIndex)) {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white)
+                        .offset(x: 1)
+                        .frame(width: 36, height: 36)
+                        .liquidGlass(Circle(), tone: .clear, interactive: true, onMedia: true)
+                }
+                .buttonStyle(PressScale(scale: 0.92))
+                .padding(.trailing, 10)
+                .padding(.bottom, 11)
+                .accessibilityLabel("继续播放 \(p.series.title)")
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(p.series.title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(STVTheme.text)
+                    .lineLimit(1)
+                Text(line(p))
+                    .font(.system(size: 12))
+                    .foregroundStyle(STVTheme.secondary)
+                    .lineLimit(1)
+            }
         }
     }
 
@@ -1191,32 +1445,44 @@ struct HomeContinueRow: View {
     }
 }
 
-/// ui-redesign 10/11: one horizontally scrolling row per board (`.hs` of 112 pt cells).
+/// ui-redesign 10/11: horizontal row on phones; borderless 4/5/6-column poster matrix for the primary tablet board.
 struct HomeShelf: View {
+    @Environment(\.layoutMetrics) private var layout
     let title: String
     let note: String?
     let items: [HGSeries]
     var more: BoardSpec? = nil
+    var gridOnTablet: Bool = false
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            DSSectionHeader(title: title, note: note) {
+            DSSectionHeader(title: title, note: note, inset: layout.pagePadding) {
                 if let more {
                     NavigationLink(value: Route.board(more)) { MoreLabel() }.buttonStyle(.plain).accessibilityIdentifier("home.more.\(title)")
                 }
             }
             if !items.isEmpty {
                 let landscape = items.first?.isLandscapeCover ?? false
-                ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(alignment: .top, spacing: 10) {
+                if gridOnTablet && layout.tier != .compact && !landscape {
+                    LazyVGrid(columns: layout.posterGridItems(spacing: 14), spacing: 18) {
                         ForEach(items) { s in
                             PosterCellView(series: s, subtitle: DS.shelfMeta(s))
-                                .frame(width: landscape ? 200 : 112)
                                 .accessibilityIdentifier("home.card")
                         }
                     }
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, layout.pagePadding)
+                } else {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        LazyHStack(alignment: .top, spacing: layout.tier == .compact ? 10 : 14) {
+                            ForEach(items) { s in
+                                PosterCellView(series: s, subtitle: DS.shelfMeta(s))
+                                    .frame(width: landscape ? (layout.tier == .compact ? 200 : 240) : layout.shelfCardWidth)
+                                    .accessibilityIdentifier("home.card")
+                            }
+                        }
+                        .padding(.horizontal, layout.pagePadding)
+                    }
+                    .compatScrollBounceBasedOnSize(axes: .horizontal)
                 }
-                .compatScrollBounceBasedOnSize(axes: .horizontal)
             }
         }
     }
