@@ -120,8 +120,28 @@ private fun isMainEntryUrl(url: Uri?): Boolean {
     return path.isNullOrEmpty() || path == "/"
 }
 
+private const val QR_HOOK_INLINE_JS =
+    "(function(){if(window.__idjQrHookInstalled)return;window.__idjQrHookInstalled=true;" +
+        "window.__idjQrMeta={token:'',checkUrl:'',csrfToken:'',traceId:''};" +
+        "function absUrl(u){try{return new URL(String(u),location.href).href;}catch(e){return String(u||'');}}" +
+        "function tokFrom(u){try{return new URL(u,location.href).searchParams.get('token')||'';}catch(e){return '';}}" +
+        "function emit(){var m=window.__idjQrMeta;if((m.token||m.checkUrl)&&window.IdjNativeLogin&&window.IdjNativeLogin.onQrMeta){try{window.IdjNativeLogin.onQrMeta(m.token||'',m.checkUrl||'',m.csrfToken||'',m.traceId||'');}catch(e){}}}" +
+        "function emitStatus(st){if(st&&window.IdjNativeLogin&&window.IdjNativeLogin.onQrPollStatus){try{window.IdjNativeLogin.onQrPollStatus(st);}catch(e){}}}" +
+        "function inspect(u,t){try{var j=JSON.parse(t);var d=j&&j.data;if(!d||typeof d!=='object')return;" +
+        "if(u.indexOf('/passport/web/get_qrcode')>=0){if(d.token){window.__idjQrMeta.token=String(d.token);window.__idjQrMeta.checkUrl='';emit();}}" +
+        "else if(u.indexOf('/passport/web/check_qrconnect')>=0){var s=String(d.status||'').toLowerCase();" +
+        "if(s==='2'||s==='scanned')emitStatus('scanned');" +
+        "else if(s==='3'||s==='confirmed'){emitStatus('confirmed');if(d.redirect_url&&!window.__idjRedirectHandled){window.__idjRedirectHandled=true;fetch(d.redirect_url,{credentials:'include',redirect:'follow'}).catch(function(){});}}" +
+        "else if(s==='5'||s==='expired'||s==='4'||s==='refuse'||s==='refused')emitStatus('expired');}}catch(e){}}" +
+        "var oo=XMLHttpRequest.prototype.open,oh=XMLHttpRequest.prototype.setRequestHeader,os=XMLHttpRequest.prototype.send;" +
+        "XMLHttpRequest.prototype.open=function(m,u){this.__idjUrl=absUrl(u);if(this.__idjUrl.indexOf('/passport/web/check_qrconnect')>=0){window.__idjQrMeta.checkUrl=this.__idjUrl;var tk=tokFrom(this.__idjUrl);if(tk)window.__idjQrMeta.token=tk;emit();}return oo.apply(this,arguments);};" +
+        "XMLHttpRequest.prototype.setRequestHeader=function(k,v){try{var lk=String(k||'').toLowerCase();if(this.__idjUrl&&this.__idjUrl.indexOf('/passport/web/check_qrconnect')>=0){if(lk==='x-tt-passport-csrf-token'&&v)window.__idjQrMeta.csrfToken=String(v);if(lk==='x-tt-passport-trace-id'&&v)window.__idjQrMeta.traceId=String(v);}}catch(e){}return oh.apply(this,arguments);};" +
+        "XMLHttpRequest.prototype.send=function(){var self=this,u=self.__idjUrl||'';if(u.indexOf('/passport/web/check_qrconnect')>=0)emit();if(u.indexOf('/passport/web/get_qrcode')>=0||u.indexOf('/passport/web/check_qrconnect')>=0){self.addEventListener('load',function(){if(self.status===200&&typeof self.responseText==='string')inspect(u,self.responseText);});}return os.apply(this,arguments);};" +
+        "if(window.fetch){var of=window.fetch;window.fetch=function(inp,init){var u=absUrl(typeof inp==='string'?inp:(inp&&inp.url)||'');if(u.indexOf('/passport/web/check_qrconnect')>=0){window.__idjQrMeta.checkUrl=u;var tk=tokFrom(u);if(tk)window.__idjQrMeta.token=tk;emit();}var p=of.apply(this,arguments);if(u.indexOf('/passport/web/get_qrcode')>=0||u.indexOf('/passport/web/check_qrconnect')>=0){p.then(function(r){if(r&&r.ok)r.clone().text().then(function(t){inspect(u,t);}).catch(function(){});}).catch(function(){});}return p;};}" +
+        "})();"
+
 private fun forceDesktopViewport(html: String): String {
-    val desktopMeta = "<meta name=\"viewport\" content=\"width=1280\">"
+    val desktopMeta = "<meta name=\"viewport\" content=\"width=1280\"><script>$QR_HOOK_INLINE_JS</script>"
     if (VIEWPORT_META_RE.containsMatchIn(html)) {
         return VIEWPORT_META_RE.replace(html, desktopMeta)
     }
@@ -204,8 +224,48 @@ private val BRIDGE_JS: String by lazy {
       } catch (e) {}
     }
 
+    function buildPollUrl() {
+      var m = window.__idjQrMeta || {};
+      if (m.checkUrl) return m.checkUrl;
+      if (m.token) {
+        return '/passport/web/check_qrconnect/?next=' + encodeURIComponent(location.origin + '/') +
+          '&token=' + encodeURIComponent(m.token) +
+          '&passport_jssdk_version=2.4.13&passport_jssdk_type=normal&is_from_ttaccountsdk=1&aid=513755&language=zh&account_sdk_source=web';
+      }
+      return '';
+    }
+
+    function pollQrInWebView() {
+      var url = buildPollUrl();
+      if (!url || window.__idjPollBusy) return;
+      window.__idjPollBusy = true;
+      var m = window.__idjQrMeta || {};
+      var hdrs = { 'Accept': 'application/json, text/javascript' };
+      if (m.csrfToken) hdrs['x-tt-passport-csrf-token'] = m.csrfToken;
+      if (m.traceId) hdrs['x-tt-passport-trace-id'] = m.traceId;
+      fetch(url, { credentials: 'include', cache: 'no-store', headers: hdrs })
+        .then(function(r) { return r.ok ? r.json() : null; })
+        .then(function(j) {
+          var d = j && j.data;
+          if (!d) return;
+          var s = String(d.status || '').toLowerCase();
+          if (s === '3' || s === 'confirmed') {
+            if (d.redirect_url) {
+              fetch(d.redirect_url, { credentials: 'include', redirect: 'follow' }).catch(function(){});
+            }
+          }
+        })
+        .catch(function() {})
+        .then(function() { window.__idjPollBusy = false; });
+    }
+
     window.__idjActions = {
       refreshQr: function() {
+        window.__idjRedirectHandled = false;
+        if (window.__idjQrMeta) {
+          window.__idjQrMeta.token = '';
+          window.__idjQrMeta.checkUrl = '';
+        }
         var dlg = findDialog();
         if (dlg) {
           var mask = dlg.querySelector('.web-login-scan-code__content__qrcode-wrapper__mask, [class*="qrcode-wrapper__mask"]');
@@ -218,6 +278,9 @@ private val BRIDGE_JS: String by lazy {
         }
         location.reload();
         return 'reloaded';
+      },
+      pollQrNow: function() {
+        pollQrInWebView();
       }
     };
 
@@ -323,11 +386,23 @@ private val BRIDGE_JS: String by lazy {
 
 private class IdjNativeLoginBridge(
     private val onQr: (base64DataUrl: String, status: String) -> Unit,
+    private val onMeta: (token: String, checkUrl: String, csrfToken: String, traceId: String) -> Unit,
+    private val onPollStatus: (status: String) -> Unit,
 ) {
     @JavascriptInterface
     fun onQrUpdate(base64DataUrl: String, status: String) {
         Log.i("IDJ-HGLogin", "onQrUpdate status=$status len=${base64DataUrl.length}")
         onQr(base64DataUrl, status)
+    }
+
+    @JavascriptInterface
+    fun onQrMeta(token: String, checkUrl: String, csrfToken: String, traceId: String) {
+        onMeta(token, checkUrl, csrfToken, traceId)
+    }
+
+    @JavascriptInterface
+    fun onQrPollStatus(status: String) {
+        onPollStatus(status)
     }
 
     @JavascriptInterface
@@ -392,10 +467,67 @@ fun HongguoLoginScreen(onBack: () -> Unit) {
     // QR state
     var qrBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var qrStatus by remember { mutableStateOf("loading") }
+    var qrToken by remember { mutableStateOf<String?>(null) }
+    var qrCheckUrl by remember { mutableStateOf<String?>(null) }
+    var qrCsrfToken by remember { mutableStateOf<String?>(null) }
+    var qrTraceId by remember { mutableStateOf<String?>(null) }
+    var verifyingNow by remember { mutableStateOf(false) }
     val qrSeq = remember { AtomicLong(0L) }
     var savingQr by remember { mutableStateOf(false) }
     var saveNotice by remember { mutableStateOf<String?>(null) }
     var saveError by remember { mutableStateOf(false) }
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+
+    suspend fun verifyQrAndLogin(userInitiated: Boolean) {
+        if (loggedInName != null) return
+        if (userInitiated) verifyingNow = true
+        try {
+            webView?.evaluateJavascript("window.__idjActions && window.__idjActions.pollQrNow();", null)
+            var pollRes: HongguoWebAccount.QRPollResult = HongguoWebAccount.QRPollResult.Failed
+            if (!qrToken.isNullOrBlank() || !qrCheckUrl.isNullOrBlank()) {
+                pollRes = account.pollQRConnectNative(qrCheckUrl, qrToken, qrCsrfToken, qrTraceId)
+                when (pollRes) {
+                    is HongguoWebAccount.QRPollResult.Scanned -> qrStatus = "scanned"
+                    is HongguoWebAccount.QRPollResult.Expired -> qrStatus = "expired"
+                    is HongguoWebAccount.QRPollResult.Confirmed -> {
+                        if (userInitiated) {
+                            saveNotice = "已确认授权，正在同步账号…"
+                            saveError = false
+                        }
+                    }
+                    else -> Unit
+                }
+            }
+            val p = account.refreshProfile()
+            if (p != null) {
+                loggedInName = p.nickname
+                delay(600)
+                currentOnBack()
+                return
+            }
+            if (pollRes is HongguoWebAccount.QRPollResult.Confirmed) {
+                delay(500)
+                val p2 = account.refreshProfile()
+                if (p2 != null) {
+                    loggedInName = p2.nickname
+                    delay(600)
+                    currentOnBack()
+                    return
+                }
+            }
+            if (userInitiated && loggedInName == null) {
+                saveError = pollRes is HongguoWebAccount.QRPollResult.Expired
+                saveNotice = when (pollRes) {
+                    is HongguoWebAccount.QRPollResult.Scanned -> "已检测到扫码，请在红果短剧 App 中点击「确认登录」"
+                    is HongguoWebAccount.QRPollResult.Expired -> "二维码已过期，请点击「刷新二维码」重新获取"
+                    is HongguoWebAccount.QRPollResult.Confirmed -> "正在同步红果会话，请稍等 1–2 秒后再点一次"
+                    else -> "尚未检测到确认状态，请确认已在红果短剧 App 中点击「确认登录」"
+                }
+            }
+        } finally {
+            if (userInitiated) verifyingNow = false
+        }
+    }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -406,22 +538,36 @@ fun HongguoLoginScreen(onBack: () -> Unit) {
         }
     }
 
-    LaunchedEffect(Unit) {
-        while (isActive) {
-            delay(2500)
-            val p = account.refreshProfile()
-            if (p != null) {
-                loggedInName = p.nickname
-                delay(600)
-                currentOnBack()
-                break
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME && loggedInName == null) {
+                scope.launch {
+                    for (ms in longArrayOf(0L, 650L, 1800L)) {
+                        if (ms > 0L) delay(ms)
+                        if (loggedInName != null) break
+                        verifyQrAndLogin(userInitiated = false)
+                    }
+                }
             }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    LaunchedEffect(Unit) {
+        while (isActive && loggedInName == null) {
+            delay(2200)
+            verifyQrAndLogin(userInitiated = false)
         }
     }
 
     fun refreshQr() {
         saveNotice = null
         qrStatus = "loading"
+        qrToken = null
+        qrCheckUrl = null
+        qrCsrfToken = null
+        qrTraceId = null
         val wv = webView ?: return
         wv.evaluateJavascript(
             "(function(){ if (window.__idjActions) { return window.__idjActions.refreshQr(); } location.reload(); return 'reloaded'; })();",
@@ -512,6 +658,10 @@ fun HongguoLoginScreen(onBack: () -> Unit) {
                                 onQr = { dataUrl, status ->
                                     val seq = qrSeq.incrementAndGet()
                                     scope.launch {
+                                        if (status == "expired" && !qrToken.isNullOrBlank() && qrStatus != "expired") {
+                                            verifyQrAndLogin(userInitiated = false)
+                                            return@launch
+                                        }
                                         val decoded = if (dataUrl.isNotBlank()) {
                                             withContext(Dispatchers.Default) {
                                                 decodeDataUrlBitmap(dataUrl)
@@ -525,6 +675,23 @@ fun HongguoLoginScreen(onBack: () -> Unit) {
                                             qrBitmap = decoded
                                         } else if (status == "loading" && dataUrl.isBlank()) {
                                             qrBitmap = null
+                                        }
+                                    }
+                                },
+                                onMeta = { token, checkUrl, csrfToken, traceId ->
+                                    scope.launch {
+                                        if (token.isNotBlank()) qrToken = token
+                                        if (checkUrl.isNotBlank()) qrCheckUrl = checkUrl
+                                        if (csrfToken.isNotBlank()) qrCsrfToken = csrfToken
+                                        if (traceId.isNotBlank()) qrTraceId = traceId
+                                    }
+                                },
+                                onPollStatus = { st ->
+                                    scope.launch {
+                                        when (st) {
+                                            "scanned" -> qrStatus = "scanned"
+                                            "expired" -> qrStatus = "expired"
+                                            "confirmed" -> verifyQrAndLogin(userInitiated = false)
                                         }
                                     }
                                 },
@@ -600,10 +767,12 @@ fun HongguoLoginScreen(onBack: () -> Unit) {
                             qrBitmap = qrBitmap,
                             qrStatus = qrStatus,
                             savingQr = savingQr,
+                            verifyingNow = verifyingNow,
                             saveNotice = saveNotice,
                             saveError = saveError,
                             onRefresh = { refreshQr() },
                             onSave = { saveQrToGallery() },
+                            onCheckNow = { scope.launch { verifyQrAndLogin(userInitiated = true) } },
                         )
 
                         Text(
@@ -625,10 +794,12 @@ private fun QrLoginCard(
     qrBitmap: Bitmap?,
     qrStatus: String,
     savingQr: Boolean,
+    verifyingNow: Boolean,
     saveNotice: String?,
     saveError: Boolean,
     onRefresh: () -> Unit,
     onSave: () -> Unit,
+    onCheckNow: () -> Unit,
 ) {
     val c = IdjThemeColors
     Column(
@@ -768,6 +939,18 @@ private fun QrLoginCard(
                 enabled = qrBitmap != null,
                 loading = savingQr,
                 onClick = onSave,
+            )
+        }
+
+        if (qrBitmap != null) {
+            GlassButton(
+                if (verifyingNow) "正在核验登录状态…" else "我已扫码确认，立即检查登录状态",
+                Modifier.fillMaxWidth().heightIn(min = 42.dp),
+                ButtonTone.Glass,
+                ButtonSize.Small,
+                enabled = !verifyingNow,
+                loading = verifyingNow,
+                onClick = onCheckNow,
             )
         }
 

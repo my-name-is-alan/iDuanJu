@@ -361,6 +361,10 @@ final class PlaybackCoordinator: NSObject, @preconcurrency AVPictureInPictureCon
 
     private func activateAudioSession() {
         Self.activeAudioOwners.insert(ObjectIdentifier(self))
+        AppAudioArbiter.shared.videoHooks = AppAudioArbiter.VideoHooks(pauseForMusicTakeover: { [weak self] in
+            self?.setPaused(true)
+        })
+        AppAudioArbiter.shared.claim(.video)
         guard !audioSessionActive else { return }
         do {
             let session = AVAudioSession.sharedInstance()
@@ -410,7 +414,9 @@ final class PlaybackCoordinator: NSObject, @preconcurrency AVPictureInPictureCon
             let c = MPRemoteCommandCenter.shared()
             [c.playCommand, c.pauseCommand, c.togglePlayPauseCommand].forEach { $0.removeTarget(self) }
             sharedCommandsRegistered = false
-            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            if AppAudioArbiter.shared.canClearNowPlaying(for: .video) {
+                MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            }
         }
         nowPlaying = nil
         if pip?.isPictureInPictureActive == true {
@@ -436,9 +442,12 @@ final class PlaybackCoordinator: NSObject, @preconcurrency AVPictureInPictureCon
         telemetry.prebuffer = nil
         externalSubtitles.clear()
         LibraryStore.shared.flush()
-        Self.activeAudioOwners.remove(ObjectIdentifier(self))
+        let removedOwner = Self.activeAudioOwners.remove(ObjectIdentifier(self)) != nil
+        if removedOwner && Self.activeAudioOwners.isEmpty {
+            AppAudioArbiter.shared.release(.video)
+        }
         if audioSessionActive {
-            if Self.activeAudioOwners.isEmpty {
+            if Self.activeAudioOwners.isEmpty && AppAudioArbiter.shared.activeOwner == .none {
                 try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             }
             audioSessionActive = false

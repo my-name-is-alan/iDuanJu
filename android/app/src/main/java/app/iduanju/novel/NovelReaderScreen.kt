@@ -38,7 +38,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.doOnLayout
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import app.iduanju.core.novel.LegadoReview
 import app.iduanju.core.novel.NovelChapter
+import app.iduanju.core.novel.NovelSource
 import app.iduanju.ui.components.*
 import app.iduanju.ui.theme.IdjColors
 import app.iduanju.ui.theme.LocalIdjColors
@@ -62,14 +64,21 @@ private val fontNames=listOf("system" to "系统字体","songti" to "宋体","ka
 internal fun NovelReaderScreen(
     bookKey:String,bookTitle:String,author:String,cover:String,sourceName:String,
     chapters:List<NovelChapter>,chapterIndex:Int,body:String,busy:Boolean,error:String?,cached:Int,
-    addedAt:Long=0,initialOffset:Int=0,onBack:()->Unit,onChapter:(Int)->Unit,onDownload:(Int)->Unit,onSwitch:(Int)->Unit,
+    addedAt:Long=0,initialOffset:Int=0,source:NovelSource?=null,bookUrl:String="",onBack:()->Unit,onChapter:(Int)->Unit,onDownload:(Int)->Unit,onSwitch:(Int)->Unit,
     onLoadChapter:suspend(Int)->String,onSearch:suspend(String)->List<app.iduanju.core.novel.NovelCache.SearchHit>,onPrefetch:(Int)->Unit,onPosition:(Int,Int)->Unit
 ) {
     val context=LocalContext.current;val view=LocalView.current;val scope=rememberCoroutineScope()
+    DisposableEffect(Unit){
+        app.iduanju.IdjApp.instance.musicPlayer.enterImmersive("novelReader")
+        onDispose{app.iduanju.IdjApp.instance.musicPlayer.leaveImmersive("novelReader")}
+    }
     val prefs=remember{context.getSharedPreferences("novel",0)}
     var settings by remember{mutableStateOf(ReaderSettings.read(prefs.getString("reader.settings",null)))}
     val pal=ReaderPalette.of(settings.theme);val bg=Color(pal.bg);val panel=Color(pal.panel);val ink=Color(pal.ink);val secondary=Color(pal.secondary)
     var menu by remember(bookKey){mutableStateOf(false)};var tab by remember(bookKey){mutableStateOf("")}
+    var showReviews by remember(bookKey){mutableStateOf(false)}
+    val hasReviews = remember(source?.id) { source != null && LegadoReview.isEnabled(source) }
+    val hasImages = remember(body, source?.id) { source?.isImage == true || body.contains("<img", ignoreCase = true) }
     var endChapter by remember(bookKey){mutableIntStateOf(-1)};var page by remember{mutableIntStateOf(1)};var pages by remember{mutableIntStateOf(1)}
     var pageView by remember{mutableStateOf<NovelPageView?>(null)}
     var autoTurn by remember{mutableStateOf(false)};var brightness by remember{mutableFloatStateOf(.5f)}
@@ -101,7 +110,16 @@ internal fun NovelReaderScreen(
     fun jump(index:Int,offset:Int=0){
         if(index !in chapters.indices)return
         autoTurn=false
-        if(settings.turn=="scroll"){scrollTarget=index to offset;scope.launch{scrollState.scrollToItem(index)}}
+        if(settings.turn=="scroll" || hasImages){
+            if(offset>0){
+                scrollTarget=index to offset
+            } else {
+                scrollTarget=null
+                lastChapter=index;lastOffset=0
+                onPosition(index,0);onPrefetch(index)
+            }
+            scope.launch{scrollState.scrollToItem(index,0)}
+        }
         else if(index==chapterIndex)pageView?.goToOffset(offset) else {endChapter=-1;jumpTarget=index to offset;onChapter(index)}
         closeMenu()
     }
@@ -116,10 +134,25 @@ internal fun NovelReaderScreen(
         }
     }
     SideEffect {activity?.window?.let{w->val c=WindowCompat.getInsetsController(w,w.decorView);c.isAppearanceLightStatusBars=settings.theme!=3;c.isAppearanceLightNavigationBars=settings.theme!=3;w.statusBarColor=pal.bg;w.navigationBarColor=pal.bg;if(menu)c.show(WindowInsetsCompat.Type.statusBars()) else c.hide(WindowInsetsCompat.Type.statusBars())}}
-    DisposableEffect(Unit){val t=TextToSpeech(context){status->if(status!=TextToSpeech.SUCCESS)listenError="朗读引擎不可用"};speech=t;onDispose{t.stop();t.shutdown()}}
-    LaunchedEffect(body,chapterIndex){texts[chapterIndex.coerceAtLeast(0)]=body}
+    DisposableEffect(Unit){val t=TextToSpeech(context){status->if(status!=TextToSpeech.SUCCESS)listenError="朗读引擎不可用"};speech=t;onDispose{t.stop();t.shutdown();if(speaking)app.iduanju.music.AppAudioArbiter.release(app.iduanju.music.AppAudioArbiter.Owner.NOVEL_TTS)}}
+    LaunchedEffect(body,chapterIndex){
+        texts[chapterIndex.coerceAtLeast(0)]=body
+        if(jumpTarget?.first==chapterIndex)jumpTarget=null
+    }
+    LaunchedEffect(hasImages,chapterIndex){
+        if(hasImages && settings.turn!="scroll"){
+            scrollTarget=null
+            scrollState.scrollToItem(chapterIndex.coerceAtLeast(0),0)
+        }
+    }
+    LaunchedEffect(scrollTarget){
+        val target=scrollTarget ?: return@LaunchedEffect
+        if(target.first in textErrors){ scrollTarget=null; return@LaunchedEffect }
+        kotlinx.coroutines.delay(1500)
+        if(scrollTarget==target) scrollTarget=null
+    }
     LaunchedEffect(settings.turn){if(settings.turn=="scroll")scrollState.scrollToItem(resume.first) else if(resume.first!=chapterIndex)onChapter(resume.first)}
-    LaunchedEffect(settings.turn,scrollState){var prefetched=-1;if(settings.turn=="scroll")snapshotFlow{Triple(scrollState.firstVisibleItemIndex,scrollState.firstVisibleItemScrollOffset,scrollTarget!=null)}.distinctUntilChanged().collect{(i,y,restoring)->
+    LaunchedEffect(settings.turn,hasImages,scrollState){var prefetched=-1;if(settings.turn=="scroll"||hasImages)snapshotFlow{Triple(scrollState.firstVisibleItemIndex,scrollState.firstVisibleItemScrollOffset,scrollTarget!=null)}.distinctUntilChanged().collect{(i,y,restoring)->
         if(!restoring){
             val t=scrollViews[i];val l=t?.layout
             val prefix=chapters.getOrNull(i)?.title?.takeIf{it.isNotBlank()}?.let{it.length+2}?:0
@@ -145,33 +178,60 @@ internal fun NovelReaderScreen(
         val contentPadding=with(density){PaddingValues(top=stableTop.toDp(),bottom=stableBottom.toDp())}
         // The page is recorded for the glass bars only while they are on screen, so page turns never pay for it.
         Box(Modifier.fillMaxSize().then(if(canGlass&&(menu||menuState.currentState))Modifier.layerBackdrop(backdrop) else Modifier),contentAlignment=Alignment.TopCenter){
-        if(settings.turn!="scroll")AndroidView(factory={NovelPageView(it).also{v->pageView=v}},modifier=readerModifier.padding(contentPadding).testTag("novel.page").semantics{contentDescription=chapters.getOrNull(chapterIndex)?.title.orEmpty()+"\n"+body},update={v->
+        if(settings.turn!="scroll" && !hasImages)AndroidView(factory={NovelPageView(it).also{v->pageView=v}},modifier=readerModifier.padding(contentPadding).testTag("novel.page").semantics{contentDescription=chapters.getOrNull(chapterIndex)?.title.orEmpty()+"\n"+body},update={v->
             v.onMenu={toggleMenu()};v.enabledTurns=!busy
             v.onEdge={d->val next=chapterIndex+d;if(next in chapters.indices){endChapter=if(d<0)next else -1;onChapter(next)}}
             v.onPosition={offset,p,n->lastChapter=chapterIndex.coerceAtLeast(0);lastOffset=offset;page=p;pages=n;onPosition(chapterIndex.coerceAtLeast(0),offset)}
             v.update(bookKey+"|"+chapterIndex+"|"+fontRevision,body,chapters.getOrNull(chapterIndex)?.title.orEmpty(),settings,if(jumpTarget?.first==chapterIndex)jumpTarget!!.second else if(endChapter==chapterIndex)Int.MAX_VALUE else if(lastChapter==chapterIndex)lastOffset else initialOffset)
-            if(jumpTarget?.first==chapterIndex)jumpTarget=null
         }) else {
             Box(readerModifier.padding(contentPadding)) {
+                val retryTick=remember(bookKey){mutableStateMapOf<Int,Int>()}
                 LazyColumn(state=scrollState,modifier=Modifier.fillMaxSize().testTag("novel.scroll").pointerInput(menu){detectTapGestures{p->if(p.x<size.width/3f)scope.launch{scrollState.animateScrollBy(-size.height*.85f)} else if(p.x>size.width*2/3f)scope.launch{scrollState.animateScrollBy(size.height*.85f)} else toggleMenu()}},contentPadding=PaddingValues(start=(12+28*settings.margin).dp,end=(12+28*settings.margin).dp,top=32.dp,bottom=30.dp)) {
                     items(maxOf(1,chapters.size),key={"$it|"+(chapters.getOrNull(it)?.url?:"local")},contentType={"chapter"}){i->
-                        LaunchedEffect(bookKey,i){if(i !in texts)try{texts[i]=onLoadChapter(i)}catch(e:CancellationException){throw e}catch(e:Exception){textErrors[i]=e.message?:"章节读取失败"}}
-                        AndroidView(factory={android.widget.TextView(it)},modifier=Modifier.fillMaxWidth().padding(bottom=24.dp),update={t->
-                            scrollViews[i]=t
-                            val content=texts[i]?:textErrors[i]?:"正文读取中…"
-                            val identity=Triple(content,settings,fontRevision)
-                            if(t.tag!=identity){
-                                t.tag=identity;t.text=ReaderText.content(content,chapters.getOrNull(i)?.title.orEmpty(),settings,context.resources.displayMetrics.scaledDensity)
-                                t.textSize=settings.font;t.typeface=ReaderText.typeface(context,settings.fontID);t.setTextColor(pal.ink);t.includeFontPadding=false;t.justificationMode=android.text.Layout.JUSTIFICATION_MODE_INTER_WORD
-                                t.setLineSpacing(settings.font*context.resources.displayMetrics.scaledDensity*(.25f+.75f*settings.spacing),1f)
+                        LaunchedEffect(bookKey,i,retryTick[i]?:0){
+                            if(i !in texts)try{
+                                textErrors.remove(i)
+                                texts[i]=onLoadChapter(i).ifBlank{"${chapters.getOrNull(i)?.title.orEmpty()}\n（本章暂无内容）"}
+                            }catch(e:CancellationException){throw e}catch(e:Exception){
+                                textErrors[i]=e.message?:"章节读取失败"
+                                if(scrollTarget?.first==i)scrollTarget=null
                             }
-                            if(restoreScroll&&i==scrollTarget?.first&&i in texts)t.doOnLayout{
-                                val l=t.layout?:return@doOnLayout
-                                val prefix=chapters.getOrNull(i)?.title?.takeIf{it.isNotBlank()}?.let{it.length+2}?:0
-                                val line=l.getLineForOffset(((scrollTarget?.second?:0)+prefix).coerceIn(0,t.text.length))
-                                scope.launch{scrollState.scrollToItem(i,l.getLineTop(line));scrollTarget=null}
+                        }
+                        val content = texts[i] ?: textErrors[i] ?: "正文读取中…"
+                        val segments = remember(content) { splitChapterSegments(content) }
+                        Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+                            segments.forEachIndexed { segIdx, seg ->
+                                when (seg) {
+                                    is ChapterSegment.ImageBlock -> NovelInlineImage(seg.url, source)
+                                    is ChapterSegment.TextBlock -> {
+                                        val segTitle = if (segIdx == 0) chapters.getOrNull(i)?.title.orEmpty() else ""
+                                        AndroidView(factory = { android.widget.TextView(it) }, modifier = Modifier.fillMaxWidth(), update = { t ->
+                                            if (segIdx == 0) scrollViews[i] = t
+                                            val identity = Triple(seg.text, settings, fontRevision)
+                                            if (t.tag != identity) {
+                                                t.tag = identity; t.text = ReaderText.content(seg.text, segTitle, settings, context.resources.displayMetrics.scaledDensity)
+                                                t.textSize = settings.font; t.typeface = ReaderText.typeface(context, settings.fontID); t.setTextColor(pal.ink); t.includeFontPadding = false; t.justificationMode = android.text.Layout.JUSTIFICATION_MODE_INTER_WORD
+                                                t.setLineSpacing(settings.font * context.resources.displayMetrics.scaledDensity * (.25f + .75f * settings.spacing), 1f)
+                                            }
+                                            if (segIdx == 0 && restoreScroll && i == scrollTarget?.first && i in texts) t.doOnLayout {
+                                                val l = t.layout
+                                                if (l == null) { scrollTarget = null; return@doOnLayout }
+                                                val prefix = chapters.getOrNull(i)?.title?.takeIf { it.isNotBlank() }?.let { it.length + 2 } ?: 0
+                                                val line = l.getLineForOffset(((scrollTarget?.second ?: 0) + prefix).coerceIn(0, t.text.length))
+                                                scope.launch { scrollState.scrollToItem(i, l.getLineTop(line)); scrollTarget = null }
+                                            }
+                                        })
+                                    }
+                                }
                             }
-                        })
+                            if (i in textErrors) {
+                                Box(Modifier.padding(top = 8.dp).clip(CircleShape).background(colors.glass).pressClick(.97f) {
+                                    textErrors.remove(i); retryTick[i] = (retryTick[i] ?: 0) + 1
+                                }.padding(horizontal = 14.dp, vertical = 8.dp)) {
+                                    Text("重新加载本章", color = ink, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                }
+                            }
+                        }
                     }
                 }
                 Text(title,color=secondary,fontSize=12.sp,modifier=Modifier.align(Alignment.TopStart).padding(horizontal=(12+28*settings.margin).dp))
@@ -189,6 +249,7 @@ internal fun NovelReaderScreen(
                 Box(Modifier.size(44.dp).pressScale(back,.92f).paperGlass(CircleShape,glass,colors).clickable(back,null,role=Role.Button,onClick=onBack).testTag("novel.reader.back"),contentAlignment=Alignment.Center){Icon(Icons.Outlined.ChevronLeft,"返回",tint=ink,modifier=Modifier.size(28.dp))}
                 Spacer(Modifier.weight(1f))
                 if(chapters.isNotEmpty())Row(Modifier.paperGlass(RoundedCornerShape(50),glass,colors).padding(horizontal=4.dp),verticalAlignment=Alignment.CenterVertically){
+                    if(hasReviews) GlassTextButton("段评",color=ink){showReviews=true;closeMenu()}
                     GlassTextButton("换源",color=ink){onSwitch(current)}
                     PlainIconButton(Icons.Outlined.DownloadForOffline,"下载",tint=ink){onDownload(current)}
                 }
@@ -198,6 +259,7 @@ internal fun NovelReaderScreen(
                     val listen=remember{MutableInteractionSource()}
                     Box(Modifier.size(48.dp).pressScale(listen,.94f).glassSurface(CircleShape,backdrop=glass,dark=true,shadowRadius=10.dp,activeOverlay=ListenInk).clickable(listen,null,role=Role.Button){selectPanel("listen")}.testTag("novel.listen"),contentAlignment=Alignment.Center){Text("听",fontSize=20.sp,fontWeight=FontWeight.Medium,color=Color.White)}
                 }
+                app.iduanju.music.ReaderMusicMiniBar(Modifier.widthIn(max=640.dp).fillMaxWidth().padding(bottom=8.dp))
                 Column(Modifier.weight(1f,fill=false).widthIn(max=640.dp).fillMaxWidth().paperGlass(RoundedCornerShape(28.dp),glass,colors,18.dp)){
                     Box(Modifier.weight(1f,fill=false).fillMaxWidth().animateContentSize(DS.panel())){
                     val panelScroll=remember(tab){ScrollState(0)}
@@ -267,7 +329,7 @@ internal fun NovelReaderScreen(
                                     }
                                 }
                             }
-                            "listen"->{header("听书");listenError?.let{Text(it,color=colors.danger,fontSize=12.sp)};ReaderPillSlider((rate-.5f)/1.5f,{rate=.5f+it*1.5f;speech?.setSpeechRate(rate)},settings,"语速","慢","快");Row(horizontalArrangement=Arrangement.spacedBy(12.dp)){pill(if(speaking)"暂停朗读" else "开始朗读"){val t=speech;if(speaking){t?.stop();speaking=false}else if(t!=null){val result=t.setLanguage(Locale.SIMPLIFIED_CHINESE);if(result<0)listenError="当前设备未安装中文语音，可在系统文字转语音设置中安装" else{t.setSpeechRate(rate);val value=texts[current]?:body;val chunks=value.chunked(TextToSpeech.getMaxSpeechInputLength());chunks.forEachIndexed{i,part->t.speak(part,if(i==0)TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,null,"$bookKey:$current:$i")};speaking=true}}};pill("停止"){speech?.stop();speaking=false}}}
+                            "listen"->{header("听书");listenError?.let{Text(it,color=colors.danger,fontSize=12.sp)};ReaderPillSlider((rate-.5f)/1.5f,{rate=.5f+it*1.5f;speech?.setSpeechRate(rate)},settings,"语速","慢","快");Row(horizontalArrangement=Arrangement.spacedBy(12.dp)){pill(if(speaking)"暂停朗读" else "开始朗读"){val t=speech;if(speaking){t?.stop();speaking=false;app.iduanju.music.AppAudioArbiter.release(app.iduanju.music.AppAudioArbiter.Owner.NOVEL_TTS)}else if(t!=null){val result=t.setLanguage(Locale.SIMPLIFIED_CHINESE);if(result<0)listenError="当前设备未安装中文语音，可在系统文字转语音设置中安装" else{app.iduanju.music.AppAudioArbiter.claim(app.iduanju.music.AppAudioArbiter.Owner.NOVEL_TTS);t.setSpeechRate(rate);val value=texts[current]?:body;val chunks=value.chunked(TextToSpeech.getMaxSpeechInputLength());chunks.forEachIndexed{i,part->t.speak(part,if(i==0)TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,null,"$bookKey:$current:$i")};speaking=true}}};pill("停止"){val was=speaking;speech?.stop();speaking=false;if(was)app.iduanju.music.AppAudioArbiter.release(app.iduanju.music.AppAudioArbiter.Owner.NOVEL_TTS)}}}
                         }
                     }
                     }
@@ -284,6 +346,9 @@ internal fun NovelReaderScreen(
                 }
             }
         }}
+        }
+        if (showReviews && source != null && current in chapters.indices) {
+            NovelReviewSheet(source, chapters[current], bookUrl, bookTitle) { showReviews = false }
         }
     }
 }

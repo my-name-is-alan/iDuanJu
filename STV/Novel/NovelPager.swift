@@ -42,7 +42,8 @@ struct NovelPageStyle: Equatable {
 final class NovelPaginator {
     let book: NovelBook
     private(set) var style: NovelPageStyle?
-    private var cache: [Int: (NSAttributedString, [NSRange])] = [:]
+    private var cache: [Int: (text: NSAttributedString, pages: [NSRange], placeholder: Bool)] = [:]
+    private var scrollCache: [Int: (text: NSAttributedString, placeholder: Bool)] = [:]
     private let store = NovelStore.shared
 
     init(book: NovelBook) { self.book = book }
@@ -54,6 +55,7 @@ final class NovelPaginator {
         guard s != style else { return false }
         style = s
         cache = [:]
+        scrollCache = [:]
         generation += 1
         return true
     }
@@ -64,7 +66,7 @@ final class NovelPaginator {
     /// Lays a neighbouring chapter out in the background. Paginating a whole chapter on the main thread was the hitch at every
     /// chapter boundary.
     func warm(_ i: Int) {
-        guard let s = style, book.chapters.indices.contains(i), cache[i] == nil, !warming.contains(i) else { return }
+        guard let s = style, book.chapters.indices.contains(i), cache[i]?.placeholder != false, !warming.contains(i) else { return }
         let title = book.chapters[i].title, raw = store.chapterText(book, i)
         guard !raw.isEmpty else { return }   // 书源 chapter still to be fetched: the loader announces it
         let font = NovelFonts.font(s.fontID, size: s.fontSize), bold = NovelFonts.font(s.fontID, size: s.fontSize * 1.3, bold: true)
@@ -77,16 +79,48 @@ final class NovelPaginator {
             }.value
             guard let self else { return }
             self.warming.remove(i)
-            if token == self.generation, self.cache[i] == nil { self.cache[i] = out }
+            if token == self.generation, self.cache[i]?.placeholder != false { self.cache[i] = (out.0, out.1, false) }
         }
     }
 
+    /// Lightweight attributed text for scroll mode (never runs TextKit multi-page pagination or triggers network inside view body).
+    func scrollChapter(_ i: Int, triggerLoad: Bool = false) -> NSAttributedString {
+        if let c = scrollCache[i], (!c.placeholder || !store.isCached(book, i)) { return c.text }
+        if let c = cache[i], (!c.placeholder || !store.isCached(book, i)) { return c.text }
+        guard let s = style, book.chapters.indices.contains(i) else { return NSAttributedString() }
+        let title = book.chapters[i].title
+        var raw = store.chapterText(book, i)
+        var isPlaceholder = false
+        if book.isWeb && raw.isEmpty {
+            isPlaceholder = true
+            let loader = NovelWebLoader.shared
+            if triggerLoad { loader.ensure(book, i) }
+            raw = title + "\n" + (loader.error(book, i).map { "加载失败：\($0)" } ?? "正在加载…")
+        }
+        let a = NovelLayout.attributed(raw, title: title, size: s.fontSize, lineSpacing: s.lineSpacing,
+            indent: s.indent, font: NovelFonts.font(s.fontID, size: s.fontSize), bold: NovelFonts.font(s.fontID, size: s.fontSize * 1.3, bold: true), color: s.text)
+        if scrollCache.count > 16 { scrollCache = scrollCache.filter { abs($0.key - i) <= 6 } }
+        scrollCache[i] = (a, isPlaceholder)
+        return a
+    }
+
+    /// Side-effect-free check for inline `<img>` tags (safe inside SwiftUI `body`; never paginates or triggers network).
+    func hasCachedImages(_ i: Int) -> Bool {
+        guard book.isWeb, book.chapters.indices.contains(i) else { return false }
+        if let c = scrollCache[i], !c.placeholder { return c.text.string.range(of: "<img", options: .caseInsensitive) != nil }
+        if let c = cache[i], !c.placeholder { return c.text.string.range(of: "<img", options: .caseInsensitive) != nil }
+        guard store.isCached(book, i) else { return false }
+        return store.chapterText(book, i).range(of: "<img", options: .caseInsensitive) != nil
+    }
+
     func chapter(_ i: Int) -> (text: NSAttributedString, pages: [NSRange]) {
-        if let c = cache[i] { return c }
+        if let c = cache[i], (!c.placeholder || !store.isCached(book, i)) { return (c.text, c.pages) }
         guard let s = style, book.chapters.indices.contains(i) else { return (NSAttributedString(), [NSRange(location: 0, length: 0)]) }
         let title = book.chapters[i].title
         var raw = store.chapterText(book, i)
+        var isPlaceholder = false
         if book.isWeb && raw.isEmpty {
+            isPlaceholder = true
             // 书源 chapter not downloaded yet: placeholder page, fetched in the background (reader re-paginates on arrival).
             let loader = NovelWebLoader.shared
             loader.ensure(book, i)
@@ -96,12 +130,23 @@ final class NovelPaginator {
             indent: s.indent, font: NovelFonts.font(s.fontID, size: s.fontSize), bold: NovelFonts.font(s.fontID, size: s.fontSize * 1.3, bold: true), color: s.text)
         let p = NovelLayout.paginate(a, size: s.size)
         if cache.count > 6 { cache = cache.filter { abs($0.key - i) <= 2 } }   // keep neighbours only
-        cache[i] = (a, p)
+        cache[i] = (a, p, isPlaceholder)
         return (a, p)
     }
 
-    /// Drops cached layouts (a 书源 chapter arrived).
-    func invalidate() { cache = [:]; generation += 1 }
+    /// Drops cached layouts (either a single arrived 书源 chapter or all chapters).
+    func invalidate(chapter i: Int? = nil) {
+        if let i {
+            cache.removeValue(forKey: i)
+            scrollCache.removeValue(forKey: i)
+            warming.remove(i)
+        } else {
+            cache = [:]
+            scrollCache = [:]
+            warming.removeAll()
+            generation += 1
+        }
+    }
 
     func pageCount(_ chapter: Int) -> Int { self.chapter(chapter).pages.count }
 
@@ -154,7 +199,11 @@ final class NovelPageView: UIView {
         self.ref = ref
         self.insets = insets
         super.init(frame: .zero)
-        let s = paginator.style!
+        let s = paginator.style ?? NovelPageStyle(
+            size: CGSize(width: 320, height: 500), fontSize: 18, lineSpacing: 0.5, indent: true, fontID: "system",
+            text: UIColor(white: 0.12, alpha: 1), secondary: UIColor(white: 0.56, alpha: 1),
+            background: .white, highlight: UIColor.systemGreen.withAlphaComponent(0.22)
+        )
         backgroundColor = s.background
         header.font = .systemFont(ofSize: 12)
         header.textColor = s.secondary
@@ -174,10 +223,10 @@ final class NovelPageView: UIView {
         textView.textContainer.lineFragmentPadding = 0
         textView.isUserInteractionEnabled = false
         let r = paginator.range(ref)
-        if NSMaxRange(r) <= chapter.text.length {
+        if r.location >= 0, NSMaxRange(r) <= chapter.text.length {
             let t = NSMutableAttributedString(attributedString: chapter.text.attributedSubstring(from: r))
             // A page that starts mid-paragraph continues a line: no first-line indent (TextKit laid it out that way).
-            if r.location > 0, (chapter.text.string as NSString).character(at: r.location - 1) != 10,
+            if t.length > 0, r.location > 0, (chapter.text.string as NSString).character(at: r.location - 1) != 10,
             let ps = t.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle, ps.firstLineHeadIndent > 0 {
                 let m = ps.mutableCopy() as! NSMutableParagraphStyle
                 m.firstLineHeadIndent = 0
@@ -236,6 +285,7 @@ final class NovelPagerController: UIViewController, UIPageViewControllerDataSour
     private var top: NovelPageView?
     private var under: NovelPageView?
     private var dragging: (forward: Bool, target: NovelPageRef)?
+    private var coverToken = 0
 
     init(paginator: NovelPaginator, start: NovelPageRef) {
         self.paginator = paginator
@@ -274,12 +324,20 @@ final class NovelPagerController: UIViewController, UIPageViewControllerDataSour
                 text: s.text, secondary: s.secondary, background: s.background, highlight: s.highlight)
             if paginator.configure(updated) {
                 current = paginator.ref(chapter: current.chapter, offset: off)
-                build()
+                show(current, forceRebuild: false)
                 let settled = current
                 DispatchQueue.main.async { [weak self] in self?.onPageChange?(settled) }
             }
-        } else if dragging == nil, let t = top, t.frame != view.bounds {
-            t.frame = view.bounds
+        } else {
+            if let p = pvc, p.view.frame != view.bounds {
+                UIView.performWithoutAnimation {
+                    p.view.frame = view.bounds
+                    p.view.layoutIfNeeded()
+                }
+            }
+            if dragging == nil, let t = top, t.frame != view.bounds {
+                t.frame = view.bounds
+            }
         }
     }
 
@@ -305,43 +363,101 @@ final class NovelPagerController: UIViewController, UIPageViewControllerDataSour
     }
 
     /// Rebuilds the visible page(s), e.g. after a style or layout change.
+    /// Always runs without animation so SwiftUI menu-dismiss springs never corrupt UIPageViewController layout/touch state.
     func build() {
-        pvc?.willMove(toParent: nil); pvc?.view.removeFromSuperview(); pvc?.removeFromParent(); pvc = nil
-        top?.removeFromSuperview(); under?.removeFromSuperview(); top = nil; under = nil
-        switch style {
-        case .curl, .slide:
-            let p = UIPageViewController(transitionStyle: style == .curl ? .pageCurl : .scroll, navigationOrientation: .horizontal,
-                options: style == .slide ? [.interPageSpacing: 0] : nil)
-            p.dataSource = self
-            p.delegate = self
-            p.isDoubleSided = false
-            // UIPageViewController's own edge taps would fight with ours.
-            p.gestureRecognizers.filter { $0 is UITapGestureRecognizer }.forEach { $0.isEnabled = false }
-            addChild(p)
-            p.view.frame = view.bounds
-            p.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            view.insertSubview(p.view, at: 0)
-            p.didMove(toParent: self)
-            p.setViewControllers([NovelPageVC(makePage(current))], direction: .forward, animated: false)
-            pvc = p
-        case .cover, .none, .scroll:
-            let t = makePage(current)
-            t.frame = view.bounds
-            t.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            view.insertSubview(t, at: 0)
-            top = t
+        coverToken += 1
+        dragging = nil
+        UIView.performWithoutAnimation {
+            pvc?.dataSource = nil
+            pvc?.delegate = nil
+            pvc?.willMove(toParent: nil); pvc?.view.removeFromSuperview(); pvc?.removeFromParent(); pvc = nil
+            top?.removeFromSuperview(); under?.removeFromSuperview(); top = nil; under = nil
+            switch style {
+            case .curl, .slide:
+                let p = UIPageViewController(transitionStyle: style == .curl ? .pageCurl : .scroll, navigationOrientation: .horizontal,
+                    options: style == .slide ? [.interPageSpacing: 0] : nil)
+                p.dataSource = self
+                p.delegate = self
+                p.isDoubleSided = false
+                // UIPageViewController's own edge taps would fight with ours.
+                p.gestureRecognizers.filter { $0 is UITapGestureRecognizer }.forEach { $0.isEnabled = false }
+                addChild(p)
+                p.view.frame = view.bounds
+                p.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                view.insertSubview(p.view, at: 0)
+                p.didMove(toParent: self)
+                p.setViewControllers([NovelPageVC(makePage(current))], direction: .forward, animated: false)
+                p.view.layoutIfNeeded()
+                pvc = p
+            case .cover, .none, .scroll:
+                let t = makePage(current)
+                t.frame = view.bounds
+                t.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                view.insertSubview(t, at: 0)
+                t.layoutIfNeeded()
+                top = t
+            }
         }
     }
 
-    func show(_ r: NovelPageRef) {
+    func show(_ r: NovelPageRef, forceRebuild: Bool = false) {
         current = r
-        if isViewLoaded { build() }
+        coverToken += 1
+        dragging = nil
+        guard isViewLoaded else { return }
+        if !forceRebuild, (style == .curl || style == .slide), let p = pvc,
+           p.transitionStyle == (style == .curl ? .pageCurl : .scroll) {
+            UIView.performWithoutAnimation {
+                p.view.frame = view.bounds
+                // Resetting dataSource flushes UIPageViewController's cached prev/next pages without tearing down the VC.
+                p.dataSource = nil
+                p.dataSource = self
+                p.setViewControllers([NovelPageVC(makePage(current))], direction: .forward, animated: false)
+                p.view.layoutIfNeeded()
+            }
+            warmNeighbours()
+            return
+        }
+        if !forceRebuild, (style == .cover || style == .none), pvc == nil {
+            UIView.performWithoutAnimation {
+                under?.removeFromSuperview(); under = nil
+                top?.removeFromSuperview()
+                let t = makePage(current)
+                t.frame = view.bounds
+                t.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                view.insertSubview(t, at: 0)
+                t.layoutIfNeeded()
+                top = t
+            }
+            warmNeighbours()
+            return
+        }
+        build()
+        warmNeighbours()
+    }
+
+    /// Flushes cached adjacent pages when a neighbouring web chapter arrives without disturbing the active page.
+    func reloadNeighbours() {
+        guard isViewLoaded, dragging == nil else { return }
+        if let p = pvc {
+            UIView.performWithoutAnimation {
+                p.dataSource = nil
+                p.dataSource = self
+            }
+        }
+        warmNeighbours()
     }
 
     private func refreshCurrent() {
         guard isViewLoaded else { return }
-        if let p = pvc { p.setViewControllers([NovelPageVC(makePage(current))], direction: .forward, animated: false) }
-        else if let t = top { let n = makePage(current); n.frame = t.frame; n.autoresizingMask = t.autoresizingMask; view.insertSubview(n, aboveSubview: t); t.removeFromSuperview(); top = n }
+        UIView.performWithoutAnimation {
+            if let p = pvc {
+                p.setViewControllers([NovelPageVC(makePage(current))], direction: .forward, animated: false)
+            } else if let t = top {
+                let n = makePage(current); n.frame = t.frame; n.autoresizingMask = t.autoresizingMask
+                view.insertSubview(n, aboveSubview: t); t.removeFromSuperview(); top = n
+            }
+        }
     }
 
     /// Animated turn in the current style (taps, 自动翻页, 听书).
@@ -450,11 +566,12 @@ final class NovelPagerController: UIViewController, UIPageViewControllerDataSour
 
     private func finishCover(commit: Bool, velocity: CGFloat) {
         guard let d = dragging, let t = top, let n = under else { dragging = nil; return }
+        let token = coverToken
         let w = view.bounds.width
         UIView.animate(withDuration: 0.28, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
             if d.forward { t.frame.origin.x = commit ? -w : 0 } else { n.frame.origin.x = commit ? 0 : -w }
         } completion: { [weak self] _ in
-            guard let self else { return }
+            guard let self, self.coverToken == token else { return }
             if commit {
                 t.removeFromSuperview()
                 n.layer.shadowOpacity = 0

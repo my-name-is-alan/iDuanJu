@@ -93,6 +93,10 @@ internal fun guardedMediaRequest(req:okhttp3.Request,origin:String):okhttp3.Requ
 @Composable
 fun NovelMediaPlayer(state: NovelPlayback.State, onClose: () -> Unit) {
     val player = NovelPlayback.exo ?: return
+    DisposableEffect(Unit) {
+        app.iduanju.IdjApp.instance.musicPlayer.enterImmersive("novelAudio")
+        onDispose { app.iduanju.IdjApp.instance.musicPlayer.leaveImmersive("novelAudio") }
+    }
     val lifecycle = LocalView.current.findViewTreeLifecycleOwner()?.lifecycle
     DisposableEffect(lifecycle, player, state.video) {
         val observer = LifecycleEventObserver { _, event -> if (state.video && event == Lifecycle.Event.ON_STOP) player.pause() }

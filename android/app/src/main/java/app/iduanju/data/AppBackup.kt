@@ -180,8 +180,9 @@ object AppBackup {
         }
         out.put("favorites", favArr)
 
-        // Search history
+        // Search history + LWW deletion tombstones
         out.put("searchHistory", JSONArray(app.library.searchHistory.toList()))
+        out.put("searchHistoryMeta", app.library.searchHistoryMeta().toJSON())
 
         // MacCMS sites
         out.put("cmsSites", JSONArray(app.cms.sites.map { it.toJSON() }))
@@ -393,6 +394,8 @@ object AppBackup {
             app.library.reloadFromPrefs()
             app.manga.reloadFromPrefs()
             app.tg.reloadFromPrefs()
+            app.settings.reloadFromPrefs()
+            app.musicStore.reloadFromPrefs()
             root.optJSONObject("portable")?.let { mergePortable(app, it) }
         }
         app.tvbox.reloadFromDisk()
@@ -456,13 +459,14 @@ object AppBackup {
                 favList += Triple(sid, o.optString("title") to o.optString("cover"), o.optLong("updatedAtMs", System.currentTimeMillis()))
             }
         }
-        // Search history
+        // Search history + tombstones
         val searchList = ArrayList<String>()
         portable.optJSONArray("searchHistory")?.let { arr ->
             for (i in 0 until arr.length()) arr.optString(i).takeIf { it.isNotBlank() }?.let { searchList += it }
         }
-        if (progList.isNotEmpty() || favList.isNotEmpty() || searchList.isNotEmpty()) {
-            app.library.mergePortable(progList, favList, searchList)
+        val searchMeta = SearchHistoryMeta.fromJSON(portable.optJSONObject("searchHistoryMeta"))
+        if (progList.isNotEmpty() || favList.isNotEmpty() || searchList.isNotEmpty() || searchMeta.clearedAt > 0L || searchMeta.deleted.isNotEmpty()) {
+            app.library.mergePortable(progList, favList, searchList, searchMeta)
         }
 
         // MacCMS sites
@@ -596,9 +600,8 @@ object AppBackup {
                         val merged = mergeFavJson(sp.getString(k, "{}") ?: "{}", entry.optString("v", "{}"))
                         ed.putString(k, merged)
                     }
-                    name == "library" && k == "search" && type == "s" -> {
-                        val merged = mergeStringArrayJson(sp.getString(k, "[]") ?: "[]", entry.optString("v", "[]"), 20)
-                        ed.putString(k, merged)
+                    name == "library" && (k == "search" || k == "searchMeta") -> {
+                        // Handled atomically after the key loop so search items and tombstones always merge together.
                     }
                     name == "idj" && k == PluginStore.KEY && type == "s" -> {
                         val merged = mergeJsonArrayByKey(entry.optString("v", "[]"), sp.getString(k, "[]") ?: "[]", "id")
@@ -640,8 +643,32 @@ object AppBackup {
                     }
                 }
             }
+            if (name == "library" && (incoming.has("search") || incoming.has("searchMeta"))) {
+                val localItems = parseStringArrayJson(sp.getString("search", "[]") ?: "[]")
+                val localMeta = SearchHistoryMeta.fromJSON(sp.getString("searchMeta", null))
+                val incItems = parseStringArrayJson(incoming.optJSONObject("search")?.optString("v", "[]") ?: "[]")
+                val incMeta = SearchHistoryMeta.fromJSON(incoming.optJSONObject("searchMeta")?.optString("v", null))
+                val (mergedItems, mergedMeta) = LibraryStore.mergeSearchHistoryState(
+                    localItems = localItems,
+                    localMeta = localMeta,
+                    incomingItems = incItems,
+                    incomingMeta = incMeta,
+                    limit = LibraryStore.SEARCH_HISTORY_LIMIT,
+                )
+                ed.putString("search", JSONArray(mergedItems).toString())
+                ed.putString("searchMeta", mergedMeta.toJSON().toString())
+            }
             ed.commit()
         }
+    }
+
+    private fun parseStringArrayJson(raw: String): List<String> {
+        val out = ArrayList<String>()
+        runCatching {
+            val arr = JSONArray(raw)
+            for (i in 0 until arr.length()) arr.optString(i).takeIf { it.isNotBlank() }?.let { out += it }
+        }
+        return out
     }
 
     private fun mergeHistoryJson(curRaw: String, incRaw: String): String {

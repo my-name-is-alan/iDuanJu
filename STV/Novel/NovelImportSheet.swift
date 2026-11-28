@@ -42,9 +42,9 @@ struct NovelImportSheet: View {
                     }
                     .buttonStyle(PressScale(scale: 0.98)).disabled(busy).padding(.top, 10).accessibilityIdentifier("import.submit")
                     group {
-                        row("doc.on.clipboard", "从剪贴板导入", "支持书源 JSON 或书源链接", id: "import.clipboard", action: importClipboard)
+                        row("doc.on.clipboard", "从剪贴板导入", "支持书源 JSON、单文件 JS 源或链接", id: "import.clipboard", action: importClipboard)
                         Hairline()
-                        row("folder", "从文件导入", "选择 .json / .txt 书源文件", id: "import.file") {
+                        row("folder", "从文件导入", "选择 .json / .js / .txt 书源文件", id: "import.file") {
                             Task { await pickSourceFile() }
                         }
                     }
@@ -80,7 +80,7 @@ struct NovelImportSheet: View {
 
     private func pickSourceFile() async {
         guard !busy else { return }
-        let urls = await SystemFilePicker.pick(types: [.json, .plainText, .text, .data, .item])
+        let urls = await SystemFilePicker.pick(types: [.json, .javaScript, .sourceCode, .plainText, .text, .data, .item])
         guard let u = urls.first else { return }
         busy = true; result = nil
         do {
@@ -92,7 +92,7 @@ struct NovelImportSheet: View {
         } catch CocoaError.fileReadTooLarge {
             result = Result(ok: false, title: "导入失败", detail: "书源文件过大（超过 32 MB）")
         } catch {
-            result = Result(ok: false, title: "导入失败", detail: (error as? LegadoSourceImportError)?.localizedDescription ?? "不是有效的 Legado 文本/媒体/RSS 源 JSON")
+            result = Result(ok: false, title: "导入失败", detail: (error as? LegadoSourceImportError)?.localizedDescription ?? "不是有效的 Legado 书源 JSON 或单文件 JS 书源")
         }
         busy = false
     }
@@ -143,8 +143,8 @@ struct NovelImportSheet: View {
             let r = try f()
             let allUnsupported = r.unsupported > 0 && r.unsupported == r.added + r.updated
             result = Result(ok: !allUnsupported, title: allUnsupported ? "当前书源类型不支持" : "新增 \(r.added) 个，更新 \(r.updated) 个",
-                            detail: r.unsupported > 0 ? "其中 \(r.unsupported) 个类型/规则暂不支持，不会启用。漫画/仅下载类型或所需规则尚未实现；文本、有声、视频和 RSS 按各自运行时处理，不表示网站失效。" : nil)
-        } catch { result = Result(ok: false, title: "导入失败", detail: (error as? LegadoSourceImportError)?.localizedDescription ?? "不是有效的 Legado 文本/媒体/RSS 源 JSON") }
+                            detail: r.unsupported > 0 ? "其中 \(r.unsupported) 个缺少搜索/发现地址或属未知类型，不会启用。" : nil)
+        } catch { result = Result(ok: false, title: "导入失败", detail: (error as? LegadoSourceImportError)?.localizedDescription ?? "不是有效的 Legado 书源 JSON 或单文件 JS 书源") }
     }
 
     private func importClipboard() {
@@ -155,7 +155,7 @@ struct NovelImportSheet: View {
 
     private func importURL() {
         let text=url.trimmingCharacters(in:.whitespacesAndNewlines)
-        if text.hasPrefix("{") || text.hasPrefix("[") {
+        if text.hasPrefix("{") || text.hasPrefix("[") || LegadoJsSource.looksLikeJsSource(text) {
             DS.endEditing();report {try store.importText(text)};return
         }
         guard let u = URL(string: text), u.scheme?.hasPrefix("http") == true else {

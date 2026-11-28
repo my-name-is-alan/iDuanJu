@@ -103,8 +103,21 @@ object EpisodeCache {
                 if (File(p.uri).length() > 0) return p
                 ready.remove(vid)
             } else if (p.uri.startsWith("$CENC_SCHEME://")) {
-                if (CencStore.get(p.uri.removePrefix("$CENC_SCHEME://")) != null) return p
-                ready.remove(vid)
+                val id = p.uri.removePrefix("$CENC_SCHEME://")
+                val cf = CencStore.get(id)
+                when {
+                    cf == null || cf.isClosed -> ready.remove(vid)
+                    cf.complete && cf.target.length() > 0 -> {
+                        val local = Playable(cf.target.absolutePath, p.quality, p.codec, true, subtitles = p.subtitles)
+                        ready[vid] = Stamped(local)
+                        return local
+                    }
+                    cf.isFailed || !hit.fresh(RESOLVE_TTL_MS) -> {
+                        ready.remove(vid)
+                        CencStore.remove(id)
+                    }
+                    else -> return p
+                }
             } else if (hit.fresh(RESOLVE_TTL_MS)) return p else ready.remove(vid)
         }
         val f = disk[safeName(vid)] ?: return null
@@ -139,9 +152,14 @@ object EpisodeCache {
 
     fun resolve(ep: HGEpisode, force: Boolean = false): Deferred<HGResolvedVideo> = synchronized(resolving) {
         val k = key(ep)
-        if (force) resolved.remove(k) else peekResolved(ep)?.let { return@synchronized CompletableDeferred(it) }
+        if (force) {
+            resolved.remove(k)
+            resolving.remove(k)?.task?.cancel()
+        } else {
+            peekResolved(ep)?.let { return@synchronized CompletableDeferred(it) }
+        }
         resolving[k]?.task?.takeIf { it.isActive } ?: scope.async(start = CoroutineStart.LAZY) {
-            val r = if (TVBoxId.isTVBox(ep.vid)) runInterruptible { app.iduanju.data.Catalog.resolve(ep) } else app.iduanju.data.Catalog.resolve(ep)
+            val r = if (TVBoxId.isTVBox(ep.vid)) runInterruptible { app.iduanju.data.Catalog.resolve(ep, force) } else app.iduanju.data.Catalog.resolve(ep, force)
             r.also { if (it.streams.isNotEmpty()) resolved[k] = Stamped(it) }
         }.also { task ->
             val entry = Resolving(ep.vid, task)
@@ -202,6 +220,7 @@ object EpisodeCache {
         CencStore.open(id, urls) {
             CencFile(id, urls, mapOf("User-Agent" to "com.phoenix.read/73932"), s.key, f) { file ->
                 disk[safeName(vid)] = file
+                ready[vid] = Stamped(Playable(file.absolutePath, s.quality, s.codec, true, subtitles = s.subtitles))
                 trim(file)
                 scope.launch { cacheFirstFrame(vid, file.absolutePath) }
                 done.tryEmit(vid)
@@ -212,7 +231,15 @@ object EpisodeCache {
 
     /** Remembers what the player opened, so coming back to the episode is instant. */
     fun remember(vid: String, p: Playable) { if (!p.live) ready[vid] = Stamped(p) }
-    fun forget(ep: HGEpisode) { ready.remove(ep.vid); resolved.remove(key(ep)) }
+    fun forget(ep: HGEpisode) {
+        val prev = ready.remove(ep.vid)?.value
+        if (prev != null && prev.uri.startsWith("$CENC_SCHEME://")) {
+            CencStore.remove(prev.uri.removePrefix("$CENC_SCHEME://"))
+        }
+        resolved.remove(key(ep))
+        synchronized(inflight) { inflight.remove(ep.vid)?.cancel() }
+        synchronized(resolving) { resolving.remove(key(ep))?.task?.cancel() }
+    }
 
     /** A cached file that does not play: download it again next time. */
     fun discard(ep: HGEpisode, path: String) {

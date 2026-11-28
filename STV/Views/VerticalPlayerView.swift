@@ -201,7 +201,7 @@ struct PlayerScreen: View {
                                 .position(x: landscape ? full.width / 2 : rect.midX, y: landscape ? full.height / 2 : rect.midY)
                                 .transition(.opacity)
                         }
-                        // Minimal 2 pt bottom progress bar when hidden; top area stays clean over portrait dramas.
+                        // Full controls appear only when HUD chrome is shown; immersive playback stays clean.
                         if !previewDanmaku {
                             controls(full, ins: ins, chrome: controlsVisible && !locked, interactive: !locked && !speedMode)
                         }
@@ -303,12 +303,14 @@ struct PlayerScreen: View {
             [.primary("好") { co.pipError = nil }]
         }
         .onAppear {
+            MusicPlayerEngine.shared.enterImmersive("video")
             StatusBarGate.shared.setHidden(landscape || !controlsVisible || panel == .danmaku, animated: false)
         }
         .compatOnChange(of: landscape || !controlsVisible || panel == .danmaku) { hideBar in
             StatusBarGate.shared.setHidden(hideBar)
         }
         .onDisappear {
+            MusicPlayerEngine.shared.leaveImmersive("video")
             StatusBarGate.shared.setHidden(false)
             co.teardown()
             adjuster.restoreBrightness()
@@ -644,24 +646,13 @@ struct PlayerScreen: View {
     /// Dim factor for everything but the progress bar while scrubbing (design: 28 %).
     private var dim: Double { scrubbing ? 0.28 : 1 }
 
-    /// `chrome`: auto-hiding controls (top bar, meta row, icon row) are shown.
-    /// `interactive`: the expanded scrubber accepts scrubbing; compact progress never intercepts gestures.
+    /// `chrome`: auto-hiding controls (top bar, meta row, timeline, icon row) are shown.
+    /// `interactive`: the expanded scrubber accepts scrubbing when chrome is visible and unlocked.
     @ViewBuilder private func controls(_ full: CGSize, ins: EdgeInsets, chrome: Bool, interactive: Bool) -> some View {
         ZStack(alignment: .topLeading) {
             if landscape { landscapeControls(full, ins: ins, chrome: chrome, interactive: interactive) }
             else { portraitControls(full, ins: ins, chrome: chrome, interactive: interactive) }
-            if !chrome { compactChrome(full, ins: ins) }
         }
-    }
-
-    /// Unobtrusive bottom-only 2 pt progress while controls are hidden (no top title over portrait dramas).
-    private func compactChrome(_ full: CGSize, ins: EdgeInsets) -> some View {
-        VStack(spacing: 0) {
-            Spacer(minLength: 0)
-            if !co.isLive { PlayerCompactProgress(clock: co.clock) }
-        }
-        .frame(width: full.width, height: full.height)
-        .allowsHitTesting(false)
     }
 
     private func exitPlayer() {
@@ -817,7 +808,7 @@ struct PlayerScreen: View {
     }
 
     /// Title + episode sit beside 返回; tech line, 连播 switch, lock and exit on the right; full-width progress row, then
-    /// 跳过片头 on the left and the labelled glass chips on the right. `compactChrome` is the always-on overlay.
+    /// 跳过片头 on the left and the labelled glass chips on the right. Hidden completely in immersive playback.
     private func landscapeControls(_ full: CGSize, ins: EdgeInsets, chrome: Bool, interactive: Bool) -> some View {
         let side = max(ins.leading, ins.trailing, 64) + 2
         return VStack(spacing: 0) {

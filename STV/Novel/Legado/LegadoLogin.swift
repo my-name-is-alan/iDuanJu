@@ -195,6 +195,31 @@ enum LegadoCookies {
         return order.compactMap { k in pairs[k].map { "\(k)=\($0)" } }.joined(separator: "; ")
     }
 
+    static func captureResponseHeaders(_ allHeaders: [AnyHashable: Any], for url: URL) {
+        var stringFields: [String: String] = [:]
+        for (k, v) in allHeaders { stringFields["\(k)"] = "\(v)" }
+        let parsed = HTTPCookie.cookies(withResponseHeaderFields: stringFields, for: url)
+        guard !parsed.isEmpty else { return }
+        let now = Date().timeIntervalSince1970
+        lock.lock()
+        var byKey: [String: Stored] = [:]
+        for existing in load() {
+            if let exp = existing.expires, exp < now { continue }
+            byKey["\(existing.domain.lowercased())|\(existing.path)|\(existing.name)"] = existing
+        }
+        for c in parsed {
+            HTTPCookieStorage.shared.setCookie(c)
+            let k = "\(c.domain.lowercased())|\(c.path)|\(c.name)"
+            if let exp = c.expiresDate, exp.timeIntervalSince1970 <= now {
+                byKey.removeValue(forKey: k)
+            } else {
+                byKey[k] = Stored(name: c.name, value: c.value, domain: c.domain, path: c.path, secure: c.isSecure, expires: c.expiresDate?.timeIntervalSince1970)
+            }
+        }
+        save(Array(byKey.values))
+        lock.unlock()
+    }
+
     static func setManual(_ cookieString: String, for url: URL) {
         guard let host = url.host, !host.isEmpty else { return }
         let parts = cookieString.split(separator: ";").compactMap { part -> (String, String)? in
@@ -379,5 +404,101 @@ enum LegadoWebView {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finishLoad() }
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { finishLoad() }
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { finishLoad() }
+    }
+}
+
+// MARK: - Login UI v2 (LegadoTeam dynamic state protocol)
+
+enum LegadoLoginV2 {
+    struct V2Field: Hashable {
+        var key: String
+        var name: String
+        var type: String
+        var options: [String]
+        var action: String?
+        var defaultValue: String
+        var value: String?
+    }
+
+    struct ActionResult {
+        var stateJSON: String?
+        var errors: [String: String] = [:]
+        var loginJSON: String?
+        var close: Bool = false
+        var message: String?
+    }
+
+    static func isV2(_ s: LegadoSource) -> Bool {
+        if let ui = s.loginUi?.trimmingCharacters(in: .whitespacesAndNewlines), ui.hasPrefix("{"),
+           let d = ui.data(using: .utf8),
+           let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+           (o["version"] as? Int) == 2 {
+            return true
+        }
+        return s.isJsSource && LegadoJsSource.hasLoginV2(s)
+    }
+
+    private static func scriptPrefix(_ s: LegadoSource) -> String? {
+        if s.isJsSource { return LegadoJS.relaxed(s.mainJs ?? "") }
+        return LegadoClient.loginJS(s).map(LegadoJS.relaxed)
+    }
+
+    static func render(_ s: LegadoSource, stateJSON: String = "{}") throws -> [V2Field] {
+        guard let js = scriptPrefix(s) else { return [] }
+        let st = stateJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "{}" : stateJSON
+        let ctx = LegadoContext(source: s); ctx.interactive = true
+        let code = js + "\n;(typeof loginUi === 'function' ? loginUi(\(st)) : {rows:[]});"
+        guard let obj = try ctx.evalJS(code, result: nil, baseURL: s.bookSourceUrl) as? [String: Any],
+              let rows = obj["rows"] as? [[String: Any]] else { return [] }
+        return rows.compactMap { d -> V2Field? in
+            let name = (d["name"] as? String) ?? (d["title"] as? String) ?? ""
+            let key = (d["key"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? name
+            guard !name.isEmpty || !key.isEmpty else { return nil }
+            let options = ((d["chars"] as? [Any]) ?? (d["options"] as? [Any]) ?? []).map { "\($0)" }
+            let defVal = d["default"].map { "\($0)" } ?? options.first ?? ""
+            return V2Field(
+                key: key,
+                name: name.isEmpty ? key : name,
+                type: (d["type"] as? String ?? "text").lowercased(),
+                options: options,
+                action: d["action"] as? String,
+                defaultValue: defVal,
+                value: d["value"].map { "\($0)" }
+            )
+        }
+    }
+
+    static func performAction(_ s: LegadoSource, action: String, stateJSON: String, form: [String: String]) throws -> ActionResult {
+        guard let js = scriptPrefix(s) else { throw LegadoError.rule("书源未定义登录脚本") }
+        let st = stateJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "{}" : stateJSON
+        let formData = (try? JSONSerialization.data(withJSONObject: form)) ?? Data("{}".utf8)
+        let formStr = String(decoding: formData, as: UTF8.self)
+        let actData = (try? JSONSerialization.data(withJSONObject: [action])) ?? Data("[\"\"]".utf8)
+        let actStr = String(String(decoding: actData, as: UTF8.self).dropFirst().dropLast())
+        let ctx = LegadoContext(source: s); ctx.interactive = true
+        let code = js + "\n;(typeof loginAction === 'function' ? loginAction(\(actStr), \(st), \(formStr)) : {});"
+        let raw = try ctx.evalJS(code, result: nil, baseURL: s.bookSourceUrl)
+        guard let obj = raw as? [String: Any] else { return ActionResult(message: LegadoAnalyzer.textOf(raw)) }
+        var res = ActionResult()
+        if let stVal = obj["state"], !(stVal is NSNull), JSONSerialization.isValidJSONObject(stVal),
+           let d = try? JSONSerialization.data(withJSONObject: stVal) {
+            res.stateJSON = String(decoding: d, as: UTF8.self)
+        }
+        if let errs = obj["error"] as? [String: Any] {
+            for (k, v) in errs { res.errors[k] = "\(v)" }
+        }
+        if let loginVal = obj["login"], !(loginVal is NSNull) {
+            if let m = loginVal as? [String: Any] {
+                let mapped = m.mapValues { "\($0)" }
+                LegadoSourceState.setLoginInfo(s.bookSourceUrl, mapped)
+                res.loginJSON = (try? JSONSerialization.data(withJSONObject: m)).map { String(decoding: $0, as: UTF8.self) }
+            } else if let b = loginVal as? Bool, b {
+                LegadoSourceState.setLoginInfo(s.bookSourceUrl, form)
+                res.loginJSON = formStr
+            }
+        }
+        res.close = obj["close"] as? Bool ?? false
+        res.message = obj["message"] as? String
+        return res
     }
 }

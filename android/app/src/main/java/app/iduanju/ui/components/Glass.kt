@@ -19,6 +19,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -586,12 +587,7 @@ fun GlassNavigationRail(
                 Modifier
                     .size(48.dp)
                     .testTag("home.search")
-                    .glassSurface(
-                        shape = CircleShape,
-                        backdrop = backdrop,
-                        shadowRadius = 14.dp,
-                        activeOverlay = if (searchSelected) c.accent.copy(alpha = if (c.dark) 0.16f else 0.12f) else Color.Transparent,
-                    )
+                    .ymDockSurface(CircleShape, shadowElevation = 12.dp)
                     .pressClick(0.94f, label = "搜索", onClick = onSearch),
                 contentAlignment = Alignment.Center,
             ) {
@@ -602,7 +598,7 @@ fun GlassNavigationRail(
         Column(
             Modifier
                 .width(56.dp)
-                .glassSurface(shape = RoundedCornerShape(30.dp), backdrop = backdrop, shadowRadius = 14.dp, veil = dockVeil())
+                .ymDockSurface(RoundedCornerShape(30.dp), shadowElevation = 14.dp)
                 .padding(vertical = 8.dp, horizontal = 4.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -624,21 +620,19 @@ fun GlassNavigationRail(
                             Modifier
                                 .matchParentSize()
                                 .graphicsLayer { scaleX = 0.6f + 0.4f * pill; alpha = pill }
-                                .then(
-                                    if (liquid) Modifier.glassPill(PillShape, selected = true, neutralSelected = true)
-                                    else Modifier.clip(PillShape).background(c.text.copy(alpha = if (c.dark) 0.16f else 0.10f)),
-                                ),
+                                .clip(PillShape)
+                                .background(if (c.dark) Color.White.copy(alpha = 0.11f) else Color.Black.copy(alpha = 0.08f)),
                         )
                         icon(on)
                     }
                     Spacer(Modifier.height(2.dp))
                     Text(
                         label,
-                        color = if (on) c.text else dockLabel(),
-                        fontSize = 10.5.sp,
+                        color = if (on) c.accent else c.text.copy(alpha = 0.62f),
+                        fontSize = 10.sp,
                         lineHeight = 12.sp,
                         maxLines = 1,
-                        fontWeight = if (on) FontWeight.SemiBold else FontWeight.Medium,
+                        fontWeight = if (on) FontWeight.Bold else FontWeight.Medium,
                     )
                 }
             }
@@ -653,21 +647,17 @@ fun GlassChip(title: String, selected: Boolean, onClick: () -> Unit) {
     val c = IdjThemeColors
     Box(
         Modifier
-            .glassSurface(
-                shape = PillShape,
-                activeOverlay = if (selected) c.accent.copy(alpha = if (c.dark) 0.24f else 0.16f) else Color.Transparent,
-                shadowRadius = 6.dp,
-            )
-            .then(if (selected) Modifier.border(0.8.dp, liquidRimBrush(c.dark, c.accent), PillShape) else Modifier)
             .clip(PillShape)
+            .background(if (selected) c.text else c.glass)
+            .then(if (selected) Modifier.border(0.9.dp, c.accent.copy(alpha = 0.55f), PillShape) else Modifier.dashedCapsuleBorder(c.hairline, width = 0.9.dp, dash = 4.5.dp, gap = 3.5.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 8.dp),
     ) {
         Text(
             title,
-            color = if (selected) c.accent else c.text.copy(alpha = 0.82f),
-            fontSize = 14.sp,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            color = if (selected) c.bg else c.text.copy(alpha = 0.82f),
+            fontSize = 13.5.sp,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
         )
     }
 }

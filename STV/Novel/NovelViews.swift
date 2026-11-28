@@ -10,10 +10,12 @@ struct NovelTextView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> UITextView {
-        let v = UITextView()
+        // TextKit 1 sizes CJK chapters synchronously so scroll mode never collapses or drifts on jump.
+        let v = UITextView(usingTextLayoutManager: false)
         v.isEditable = false
         v.isSelectable = false
         v.isScrollEnabled = false
+        v.isUserInteractionEnabled = false
         v.backgroundColor = .clear
         v.textContainerInset = .zero
         v.textContainer.lineFragmentPadding = 0
@@ -29,9 +31,14 @@ struct NovelTextView: UIViewRepresentable {
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
-        let w = proposal.width ?? 320
-        if proposal.height != nil, proposal.height != .infinity { return CGSize(width: w, height: proposal.height!) }
-        return CGSize(width: w, height: ceil(uiView.sizeThatFits(CGSize(width: w, height: .greatestFiniteMagnitude)).height))
+        let w = max(1, proposal.width ?? 320)
+        if let h = proposal.height, h.isFinite, h > 0 { return CGSize(width: w, height: h) }
+        if context.coordinator.shown !== text {
+            context.coordinator.shown = text
+            uiView.attributedText = text
+        }
+        let fit = ceil(uiView.sizeThatFits(CGSize(width: w, height: .greatestFiniteMagnitude)).height)
+        return CGSize(width: w, height: max(24, fit))
     }
 }
 

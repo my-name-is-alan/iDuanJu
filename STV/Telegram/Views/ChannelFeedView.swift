@@ -182,7 +182,7 @@ struct ChannelFeedView: View {
     }
 
     private func toolIcon(_ name: String) -> some View {
-        Image(systemName: name).font(.system(size: 16, weight: .medium)).foregroundStyle(STVTheme.text).frame(width: 42, height: 42).contentShape(Rectangle())
+        Image(systemName: name).font(.system(size: 16, weight: .medium)).foregroundStyle(STVTheme.text).frame(width: 38, height: 40).contentShape(Rectangle())
     }
 
     private var channelChips: some View {

@@ -5,8 +5,14 @@ import Combine
 @MainActor
 final class NovelWebLoader: ObservableObject {
     static let shared = NovelWebLoader()
+    struct RevisionEvent: Equatable {
+        var seq = 0
+        var bookID: String?
+        var chapter: Int?
+    }
     /// Bumped whenever a chapter arrives or fails, so open readers re-paginate.
     @Published private(set) var revision = 0
+    @Published private(set) var lastEvent = RevisionEvent()
     @Published private(set) var failed: [String: String] = [:]
     private var running: [String: Task<Void, Error>] = [:]
     private var prefetchDrivers: [String: Task<Void, Never>] = [:]
@@ -27,6 +33,11 @@ final class NovelWebLoader: ObservableObject {
     private let store = NovelStore.shared
 
     private func key(_ b: NovelBook, _ i: Int) -> String { NovelStore.chapterFile(b, i).path }
+
+    private func bumpRevision(bookID: String? = nil, chapter: Int? = nil) {
+        revision += 1
+        lastEvent = RevisionEvent(seq: revision, bookID: bookID, chapter: chapter)
+    }
 
     func error(_ b: NovelBook, _ i: Int) -> String? { failed[key(b, i)] }
     func isLoading(_ b: NovelBook, _ i: Int) -> Bool { running[key(b, i)] != nil }
@@ -63,7 +74,7 @@ final class NovelWebLoader: ObservableObject {
         if let task = running[k] { return try await wait(task) }
         guard let source = LegadoSourceStore.shared.source(b.sourceURL ?? ""), let urls = b.chapterURLs, urls.indices.contains(i) else {
             failed[k] = "书源已删除，无法加载"
-            revision += 1
+            bumpRevision(bookID: b.id, chapter: i)
             throw LegadoError.empty("书源已删除，无法加载")
         }
         let chapter = LegadoChapter(title: b.chapters[i].title, url: urls[i],index:i)
@@ -86,14 +97,14 @@ final class NovelWebLoader: ObservableObject {
             }
         }
         running[k] = task
-        defer { running[k] = nil; revision += 1 }
+        defer { running[k] = nil; bumpRevision(bookID: b.id, chapter: i) }
         try await wait(task)
     }
 
     func retry(_ b: NovelBook, _ i: Int) {
         failed[key(b, i)] = nil
         ensure(b, i)
-        revision += 1
+        bumpRevision(bookID: b.id, chapter: i)
     }
 
     /// Same bounded neighbor-first policy as the Android implementation; no UI appearance changes.
@@ -146,8 +157,54 @@ final class NovelWebLoader: ObservableObject {
         downloadStates[book.id] = DownloadState(total: end - start, active: true)
         downloads[book.id] = Task {
             defer { downloads[book.id] = nil; downloadStates[book.id]?.active = false }
-            for i in start..<end {
+            let source = LegadoSourceStore.shared.source(book.sourceURL ?? "")
+            let batchSize = (source?.supportsContentBatch == true) ? max(2, source?.maxBatchSize ?? 0) : 0
+            let urls = book.chapterURLs ?? []
+            var i = start
+            while i < end {
                 if Task.isCancelled || store.book(book.id) == nil { downloadStates[book.id]?.message = "已暂停，可继续下载"; return }
+                if batchSize > 1, let src = source {
+                    var pending: [(Int, LegadoChapter)] = []
+                    var j = i
+                    while j < end && pending.count < batchSize {
+                        if !store.isCached(book, j), urls.indices.contains(j) {
+                            pending.append((j, LegadoChapter(title: book.chapters[j].title, url: urls[j], index: j)))
+                        } else if store.isCached(book, j) {
+                            downloadStates[book.id]?.completed += 1
+                        }
+                        j += 1
+                    }
+                    if pending.count > 1 {
+                        let bookInfo: [String: Any] = ["name": book.title, "author": book.author ?? "", "bookUrl": book.bookURL ?? "", "tocUrl": book.tocURL ?? ""]
+                        nonisolated(unsafe) let info = bookInfo
+                        let chs = pending.map(\.1)
+                        let batchMap = (try? await LegadoClient.run { try LegadoClient.contentBatch(src, chapters: chs, book: info) }) ?? [:]
+                        var missed: [Int] = []
+                        for (idx, ch) in pending {
+                            if let text = batchMap[ch.url], !text.isEmpty {
+                                let full = text.hasPrefix(ch.title) ? text : ch.title + "\n" + text
+                                try? store.cache(book, idx, full)
+                                downloadStates[book.id]?.completed += 1
+                            } else {
+                                missed.append(idx)
+                            }
+                        }
+                        bumpRevision(bookID: book.id, chapter: nil)
+                        for idx in missed {
+                            if Task.isCancelled || store.book(book.id) == nil { downloadStates[book.id]?.message = "已暂停，可继续下载"; return }
+                            do {
+                                try await load(book, idx)
+                                downloadStates[book.id]?.completed += 1
+                            } catch {
+                                downloadStates[book.id]?.failures += 1
+                                downloadStates[book.id]?.message = error.localizedDescription
+                                return
+                            }
+                        }
+                        i = j
+                        continue
+                    }
+                }
                 do {
                     try await load(book, i)
                     downloadStates[book.id]?.completed += 1
@@ -157,6 +214,7 @@ final class NovelWebLoader: ObservableObject {
                     // A blocked/login-required source must not fan out across an entire book.
                     return
                 }
+                i += 1
             }
             if downloadStates[book.id]?.failures == 0 { downloadStates[book.id]?.message = "下载完成，已可离线阅读" }
         }

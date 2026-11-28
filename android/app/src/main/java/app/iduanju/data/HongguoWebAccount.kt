@@ -25,6 +25,14 @@ class HongguoWebAccount(ctx: Context) {
 
     data class Profile(val nickname: String, val avatarUrl: String)
 
+    sealed class QRPollResult {
+        data object Waiting : QRPollResult()
+        data object Scanned : QRPollResult()
+        data class Confirmed(val redirectUrl: String?) : QRPollResult()
+        data object Expired : QRPollResult()
+        data object Failed : QRPollResult()
+    }
+
     companion object {
         const val WEB_ORIGIN = "https://hongguoduanju.com"
         const val PC_USER_AGENT =
@@ -39,10 +47,43 @@ class HongguoWebAccount(ctx: Context) {
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private val TAG_RE_PLAIN = Regex(""""pcHistorySessionTag"\s*:\s*"([^"]+)"""")
         private val TAG_RE_ESCAPED = Regex("""\\"pcHistorySessionTag\\"\s*:\s*\\"([^\\"]+)\\"""")
+
+        fun buildCheckQrUrl(checkUrl: String?, token: String?): String? {
+            val raw = checkUrl?.trim().orEmpty()
+            if (raw.startsWith("https://") && raw.contains("hongguoduanju.com")) {
+                return raw
+            }
+            val tok = token?.trim().orEmpty()
+            if (tok.isEmpty()) return null
+            val encodedNext = java.net.URLEncoder.encode("$WEB_ORIGIN/", "UTF-8")
+            val encodedTok = java.net.URLEncoder.encode(tok, "UTF-8")
+            return "$WEB_ORIGIN/passport/web/check_qrconnect/?next=$encodedNext&token=$encodedTok" +
+                "&passport_jssdk_version=2.4.13&passport_jssdk_type=normal&is_from_ttaccountsdk=1" +
+                "&aid=513755&language=zh&account_sdk_source=web"
+        }
+
+        fun parseQrConnectResponse(body: String): QRPollResult {
+            val root = runCatching { JSONObject(body) }.getOrNull() ?: return QRPollResult.Failed
+            val d = root.optJSONObject("data") ?: return QRPollResult.Failed
+            val rawStatus = d.opt("status")?.toString()?.trim()?.lowercase().orEmpty()
+            val redirect = d.optString("redirect_url").trim().takeIf { it.isNotEmpty() }
+            return when (rawStatus) {
+                "confirmed", "3" -> QRPollResult.Confirmed(redirect)
+                "scanned", "2" -> QRPollResult.Scanned
+                "expired", "5", "refuse", "refused", "cancel", "cancelled", "4" -> QRPollResult.Expired
+                "new", "1" -> QRPollResult.Waiting
+                else -> if (d.optInt("error_code", 0) != 0) QRPollResult.Expired else QRPollResult.Failed
+            }
+        }
     }
 
     private val sp = ctx.applicationContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
     private val http = OkHttpClient.Builder().callTimeout(15, TimeUnit.SECONDS).build()
+    private val noRedirectHttp = OkHttpClient.Builder()
+        .callTimeout(15, TimeUnit.SECONDS)
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .build()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val sessionTags = ConcurrentHashMap<String, Pair<String, Long>>()
     private val lastReportedAt = ConcurrentHashMap<String, Long>()
@@ -75,6 +116,93 @@ class HongguoWebAccount(ctx: Context) {
     fun cookies(): String? = runCatching {
         CookieManager.getInstance().getCookie(WEB_ORIGIN)
     }.getOrNull()?.takeIf { it.isNotBlank() }
+
+    private fun extractCookieValue(cookieHeader: String?, name: String): String? {
+        if (cookieHeader.isNullOrBlank()) return null
+        return cookieHeader.split(";")
+            .map { it.trim() }
+            .firstOrNull { it.startsWith("$name=") }
+            ?.substringAfter("=")
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * Native `check_qrconnect` poll that survives Android background WebView throttling / SDK "Network Error"
+     * when the user switches to Hongguo App to scan a saved/screenshotted QR code. Writes all `Set-Cookie`
+     * headers (and follows `redirect_url` hops if present) directly into `CookieManager`.
+     */
+    suspend fun pollQRConnectNative(
+        checkUrl: String?,
+        token: String?,
+        csrfToken: String? = null,
+        traceId: String? = null,
+    ): QRPollResult = withContext(Dispatchers.IO) {
+        val targetUrl = buildCheckQrUrl(checkUrl, token) ?: return@withContext QRPollResult.Failed
+        val cm = CookieManager.getInstance()
+        runCatching { cm.flush() }
+        val cookie = cm.getCookie(targetUrl) ?: cm.getCookie(WEB_ORIGIN)
+        val resolvedCsrf = csrfToken?.takeIf { it.isNotBlank() }
+            ?: extractCookieValue(cookie, "passport_csrf_token")
+            ?: extractCookieValue(cookie, "passport_csrf_token_default")
+
+        val reqBuilder = Request.Builder()
+            .url(targetUrl)
+            .header("User-Agent", PC_USER_AGENT)
+            .header("Referer", "$WEB_ORIGIN/")
+            .header("Accept", "application/json, text/javascript")
+            .get()
+        if (!cookie.isNullOrBlank()) reqBuilder.header("Cookie", cookie)
+        if (!resolvedCsrf.isNullOrBlank()) reqBuilder.header("x-tt-passport-csrf-token", resolvedCsrf)
+        if (!traceId.isNullOrBlank()) reqBuilder.header("x-tt-passport-trace-id", traceId)
+
+        try {
+            val (result, cookiesUpdated) = noRedirectHttp.newCall(reqBuilder.build()).execute().use { resp ->
+                val setCookies = resp.headers("Set-Cookie")
+                setCookies.forEach { sc -> cm.setCookie(targetUrl, sc) }
+                val body = resp.body?.string().orEmpty()
+                parseQrConnectResponse(body) to setCookies.isNotEmpty()
+            }
+            var dirty = cookiesUpdated
+            if (result is QRPollResult.Confirmed && !result.redirectUrl.isNullOrBlank()) {
+                var currentUrl: String? = result.redirectUrl
+                var hops = 0
+                while (!currentUrl.isNullOrBlank() && hops < 6) {
+                    hops++
+                    val hopUrl = currentUrl
+                    val hopCookie = cm.getCookie(hopUrl) ?: cm.getCookie(WEB_ORIGIN)
+                    val hopReq = Request.Builder()
+                        .url(hopUrl)
+                        .header("User-Agent", PC_USER_AGENT)
+                        .header("Referer", "$WEB_ORIGIN/")
+                        .apply { if (!hopCookie.isNullOrBlank()) header("Cookie", hopCookie) }
+                        .get()
+                        .build()
+                    val nextLoc = runCatching {
+                        noRedirectHttp.newCall(hopReq).execute().use { hopResp ->
+                            val hopSetCookies = hopResp.headers("Set-Cookie")
+                            hopSetCookies.forEach { sc -> cm.setCookie(hopUrl, sc) }
+                            if (hopSetCookies.isNotEmpty()) dirty = true
+                            if (hopResp.code in 300..399) {
+                                val loc = hopResp.header("Location")
+                                if (!loc.isNullOrBlank()) java.net.URI(hopUrl).resolve(loc).toString() else null
+                            } else {
+                                null
+                            }
+                        }
+                    }.getOrNull()
+                    currentUrl = nextLoc
+                }
+            }
+            if (dirty) runCatching { cm.flush() }
+            result
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "pollQRConnectNative failed", e)
+            QRPollResult.Failed
+        }
+    }
 
     private suspend fun saveProfile(next: Profile?) {
         if (next == null) {

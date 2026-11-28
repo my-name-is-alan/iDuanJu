@@ -1,8 +1,7 @@
-/* iOS port of legado-E help/http/BackstageWebView.kt + AnalyzeUrl useWebView/webJs/webViewDelayTime/
- * sourceRegex at 8b87c5aba4df91c39a3a0939a68a1180b9f2ee1c (Copyright Legado contributors, GPL-3.0).
- * Same contract as android/core LegadoBackstage.kt; WKWebView is main-actor only. Adapted: non-persistent
- * website data per load, no script message bridge, TLS failures are not bypassed, private-network
- * request URLs blocked by a content rule list, main-frame HTTP >= 400 reported, cancellation destroys. */
+/* iOS port of legado-E / LegadoTeam/legado help/http/BackstageWebView.kt + AnalyzeUrl
+ * (useWebView/webJs/webViewDelayTime/sourceRegex/overrideUrlRegex/POST/HTML). GPL-3.0.
+ * TLS failures are NOT bypassed; private-network hosts blocked by WKContentRuleList;
+ * cancellation destroys the WKWebView cleanly. */
 import Foundation
 import WebKit
 
@@ -13,6 +12,11 @@ struct LegadoBackstageRequest {
     var sourceRegex: String?
     var delayMs: Int
     var timeout: TimeInterval = 60
+    var method: String = "GET"
+    var body: String? = nil
+    var html: String? = nil
+    var overrideUrlRegex: String? = nil
+    var useCookies: Bool = false
 }
 
 /// Cooperative cancellation for blocking source work on LegadoClient.run threads.
@@ -34,10 +38,8 @@ enum LegadoBackstage {
     static let retryIntervals = [200, 400, 600, 800, 1000]
     static let maxRetry = 30
     static let sniffJS = "(function(){var a=[];try{performance.getEntriesByType('resource').forEach(function(e){a.push(e.name)})}catch(e){}document.querySelectorAll('video,audio,source').forEach(function(e){if(e.currentSrc)a.push(e.currentSrc);if(e.src)a.push(e.src)});return JSON.stringify(a)})()"
-    /// Test seam (deterministic fixtures); production uses WKWebView.
     nonisolated(unsafe) static var loader: ((LegadoBackstageRequest) throws -> LegadoResponse)?
 
-    /// Upstream Options.useWebView(): null, "", false, "false" -> false; anything else (even “true”) -> true.
     static func useWebView(_ v: Any?) -> Bool {
         switch v {
         case nil, is NSNull: return false
@@ -73,7 +75,7 @@ enum LegadoBackstage {
         }
         let deadline = Date().addingTimeInterval(r.timeout)
         while sem.wait(timeout: .now() + 0.1) == .timedOut {
-            if token?.isCancelled == true { _ = box.set(.failure(CancellationError())) ; break }
+            if token?.isCancelled == true { _ = box.set(.failure(CancellationError())); break }
             if Date() >= deadline { _ = box.set(.failure(LegadoError.network("WebView 解析超时（\(Int(r.timeout))秒）"))); break }
         }
         Task { @MainActor in box.runner?.destroy(); box.runner = nil }
@@ -88,9 +90,6 @@ enum LegadoBackstage {
     }
 
     nonisolated(unsafe) private static var compiledRules: WKContentRuleList?
-    /// Private / loopback / link-local literal hosts and local names. DNS-level rebinding of subresources cannot be
-    /// intercepted by public WKWebView API; the page URL itself is DNS-checked before load (LegadoMedia.checkedURL).
-    // WebKit content-blocker regex has no alternation/negated classes: one literal-prefix rule per range.
     private static let privateRules = #"[{"trigger":{"url-filter":"^[a-z]+://127\\."},"action":{"type":"block"}},{"trigger":{"url-filter":"^[a-z]+://10\\."},"action":{"type":"block"}},{"trigger":{"url-filter":"^[a-z]+://0\\."},"action":{"type":"block"}},{"trigger":{"url-filter":"^[a-z]+://169\\.254\\."},"action":{"type":"block"}},{"trigger":{"url-filter":"^[a-z]+://192\\.168\\."},"action":{"type":"block"}},{"trigger":{"url-filter":"^[a-z]+://172\\.1[6-9]\\."},"action":{"type":"block"}},{"trigger":{"url-filter":"^[a-z]+://172\\.2[0-9]\\."},"action":{"type":"block"}},{"trigger":{"url-filter":"^[a-z]+://172\\.3[0-1]\\."},"action":{"type":"block"}},{"trigger":{"url-filter":"^[a-z]+://100\\.6[4-9]\\."},"action":{"type":"block"}},{"trigger":{"url-filter":"^[a-z]+://100\\.[7-9][0-9]\\."},"action":{"type":"block"}},{"trigger":{"url-filter":"^[a-z]+://100\\.1[0-1][0-9]\\."},"action":{"type":"block"}},{"trigger":{"url-filter":"^[a-z]+://100\\.12[0-7]\\."},"action":{"type":"block"}},{"trigger":{"url-filter":"^[a-z]+://localhost"},"action":{"type":"block"}},{"trigger":{"url-filter":"^[a-z]+://\\["},"action":{"type":"block"}},{"trigger":{"url-filter":"^file:"},"action":{"type":"block"}},{"trigger":{"url-filter":"^ftp:"},"action":{"type":"block"}}]"#
 
     @MainActor private final class Runner: NSObject, WKNavigationDelegate {
@@ -101,12 +100,20 @@ enum LegadoBackstage {
         var done = false
         init(request: LegadoBackstageRequest, finish: @escaping (Result<LegadoResponse, Error>) -> Void) { self.request = request; self.finish = finish }
 
-        func complete(_ r: Result<LegadoResponse, Error>) { guard !done else { return }; done = true; finish(r); destroy() }
+        func complete(_ r: Result<LegadoResponse, Error>) {
+            guard !done else { return }
+            done = true
+            if request.useCookies, let store = web?.configuration.websiteDataStore.httpCookieStore {
+                Task { @MainActor in await LegadoCookies.syncFromWebKit(store: store) }
+            }
+            finish(r)
+            destroy()
+        }
         func destroy() { done = true; web?.stopLoading(); web?.navigationDelegate = nil; web = nil }
 
         func start() async {
             let cfg = WKWebViewConfiguration()
-            cfg.websiteDataStore = .nonPersistent()
+            cfg.websiteDataStore = request.useCookies ? .default() : .nonPersistent()
             cfg.mediaTypesRequiringUserActionForPlayback = .all
             cfg.allowsInlineMediaPlayback = true
             if LegadoBackstage.compiledRules == nil {
@@ -119,7 +126,19 @@ enum LegadoBackstage {
             w.customUserAgent = request.headers.first { $0.key.caseInsensitiveCompare("User-Agent") == .orderedSame }?.value ?? LegadoHTTP.userAgent
             w.navigationDelegate = self
             web = w
+            if let html = request.html, !html.isEmpty {
+                w.loadHTMLString(html, baseURL: request.url)
+                return
+            }
             var req = URLRequest(url: request.url)
+            req.httpMethod = request.method
+            if request.method.uppercased() == "POST", let body = request.body {
+                req.httpBody = Data(body.utf8)
+                if !request.headers.keys.contains(where: { $0.caseInsensitiveCompare("Content-Type") == .orderedSame }) {
+                    let isJSON = body.trimmingCharacters(in: .whitespaces).hasPrefix("{")
+                    req.setValue(isJSON ? "application/json; charset=UTF-8" : "application/x-www-form-urlencoded; charset=UTF-8", forHTTPHeaderField: "Content-Type")
+                }
+            }
             for (k, v) in request.headers where k.caseInsensitiveCompare("User-Agent") != .orderedSame { req.setValue(v, forHTTPHeaderField: k) }
             w.load(req)
         }
@@ -133,7 +152,11 @@ enum LegadoBackstage {
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
-            Runner.cheapAllowed(navigationAction.request.url) ? .allow : .cancel
+            if let ov = request.overrideUrlRegex, let navUrl = navigationAction.request.url?.absoluteString, LegadoBackstage.matches(ov, navUrl) {
+                complete(.success(LegadoResponse(url: request.url, status: 200, headers: [:], body: Data(navUrl.utf8), text: navUrl)))
+                return .cancel
+            }
+            return Runner.cheapAllowed(navigationAction.request.url) ? .allow : .cancel
         }
         func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse) async -> WKNavigationResponsePolicy {
             if navigationResponse.isForMainFrame, let http = navigationResponse.response as? HTTPURLResponse, http.statusCode >= 400 {

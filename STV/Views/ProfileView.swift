@@ -12,9 +12,19 @@ struct ProfileView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                Text("我的").dsFont(32, .heavy, relativeTo: .largeTitle).foregroundStyle(STVTheme.text)
-                    .padding(.horizontal, layout.tier == .compact ? 20 : layout.pagePadding)
-                    .accessibilityAddTraits(.isHeader)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 7) {
+                        Text("我的").dsFont(32, .heavy, relativeTo: .largeTitle).foregroundStyle(STVTheme.text)
+                            .accessibilityAddTraits(.isHeader)
+                        YMDoodleSparkle()
+                            .fill(STVTheme.accent)
+                            .frame(width: 15, height: 15)
+                            .rotationEffect(.degrees(12))
+                    }
+                    YMAnimatedWave(waves: 3, color: STVTheme.accent.opacity(0.75), lineWidth: 2.2, speed: 1.8)
+                        .frame(width: 62, height: 8)
+                }
+                .padding(.horizontal, layout.tier == .compact ? 20 : layout.pagePadding)
 
                 if layout.tier == .expanded {
                     HStack(alignment: .top, spacing: 24) {
@@ -221,13 +231,14 @@ private struct ProfileLinks: View {
     @ObservedObject private var gate = SourceGate.shared
     /// Counts of stores that load from disk: read after the first frame instead of while 我的 is being built.
     @State private var counts = Counts()
-    private struct Counts: Equatable { var channels: String?; var manga: String?; var downloads: String?; var plugins: String? }
+    private struct Counts: Equatable { var channels: String?; var manga: String?; var music: String?; var downloads: String?; var plugins: String? }
 
     var body: some View {
         Group {
             DSSection(separatorInset: 58) {
                 DSLinkRow("Telegram 频道", route: Route.channels, icon: "paperplane", value: counts.channels)
                 DSLinkRow("漫画", route: Route.mangaHome, icon: "book", value: counts.manga)
+                DSLinkRow("音乐与音源设置", route: Route.musicSettings, icon: "music.note.list", value: counts.music)
                 DSLinkRow("下载管理", route: Route.downloads, icon: "arrow.down.circle", value: counts.downloads)
             }
             DSSection(separatorInset: 58) {
@@ -239,8 +250,11 @@ private struct ProfileLinks: View {
         .task(id: refreshTick) {
             await Task.yield()
             let plugins = PluginStore.shared.visiblePlugins.count + CMSStore.shared.visibleSites.count
+            let loggedInCount = MusicStore.shared.sourcePrefs.filter { $0.customCookie?.isEmpty == false }.count
+            let musicSrc = MusicStore.shared.enabledOnlineSources.count + MusicStore.shared.nasConfigs.count
             counts = Counts(channels: "\(TGStore.shared.visibleChannels.count) 个",
                             manga: MangaStore.shared.favorites.isEmpty ? nil : "收藏 \(MangaStore.shared.favorites.count)",
+                            music: loggedInCount > 0 ? "已登录 \(loggedInCount) · \(musicSrc) 源" : "\(musicSrc) 源",
                             downloads: TGDownloads.shared.visible.isEmpty ? nil : "\(TGDownloads.shared.visible.count)",
                             plugins: plugins > 0 ? "\(plugins) 个" : nil)
         }

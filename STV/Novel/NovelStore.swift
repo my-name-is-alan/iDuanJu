@@ -35,6 +35,7 @@ final class NovelStore: ObservableObject {
     @Published private(set) var books: [NovelBook] = []
     @Published private(set) var progress: [String: NovelProgress] = [:]
     private var textCache: [String: String] = [:]
+    private var migratedBooks: Set<String> = []
     private let d = UserDefaults.standard
 
     private init() {
@@ -115,6 +116,7 @@ final class NovelStore: ObservableObject {
         books.removeAll { $0.id == b.id }
         progress[b.id] = nil
         textCache[b.id] = nil
+        migratedBooks.remove(b.id)
         try? FileManager.default.removeItem(at: Self.dir(b.id))
         save(books, "stv.novel.books")
         save(progress, "stv.novel.progress")
@@ -190,7 +192,8 @@ final class NovelStore: ObservableObject {
         b.tocURL = info?.tocURL ?? item.bookURL
         b.coverURL = (info?.cover).flatMap { $0.isEmpty ? nil : $0 } ?? (item.cover.isEmpty ? nil : item.cover)
         b.chapterURLs = toc.map(\.url)
-        try? FileManager.default.createDirectory(at: Self.dir(b.id), withIntermediateDirectories: true)
+        let bookDir = Self.dir(b.id)
+        try? FileManager.default.createDirectory(at: bookDir, withIntermediateDirectories: true)
         books.insert(b, at: 0)
         save(books, "stv.novel.books")
         return b
@@ -200,18 +203,31 @@ final class NovelStore: ObservableObject {
 
     /// Legacy indexed files must be migrated once, before any TOC changes.
     private func migrateLegacyCache(_ b: NovelBook) {
-        let marker = Self.dir(b.id).appendingPathComponent("cache-v2.migrated")
-        guard b.isWeb, !FileManager.default.fileExists(atPath: marker.path) else { return }
+        guard b.isWeb, !migratedBooks.contains(b.id) else { return }
+        let bookDir = Self.dir(b.id)
+        let marker = bookDir.appendingPathComponent("cache-v2.migrated")
+        let fm = FileManager.default
+        if fm.fileExists(atPath: marker.path) {
+            migratedBooks.insert(b.id)
+            return
+        }
+        let legacyDir = bookDir.appendingPathComponent("ch")
         do {
-            for j in b.chapters.indices {
-                let old = Self.dir(b.id).appendingPathComponent("ch/\(j).txt")
-                let target = Self.chapterFile(b, j)
-                if FileManager.default.fileExists(atPath: old.path), !FileManager.default.fileExists(atPath: target.path) {
-                    let text = try String(contentsOf: old, encoding: .utf8)
-                    if !text.isEmpty { try cache(b, j, text) }
+            if !fm.fileExists(atPath: bookDir.path) {
+                try fm.createDirectory(at: bookDir, withIntermediateDirectories: true)
+            }
+            if fm.fileExists(atPath: legacyDir.path) {
+                for j in b.chapters.indices {
+                    let old = legacyDir.appendingPathComponent("\(j).txt")
+                    let target = Self.chapterFile(b, j)
+                    if fm.fileExists(atPath: old.path), !fm.fileExists(atPath: target.path) {
+                        let text = try String(contentsOf: old, encoding: .utf8)
+                        if !text.isEmpty { try cache(b, j, text) }
+                    }
                 }
             }
             try Data().write(to: marker, options: .atomic)
+            migratedBooks.insert(b.id)
         } catch { /* Leave the marker absent so a failed write can be retried. */ }
     }
 
@@ -238,7 +254,7 @@ final class NovelStore: ObservableObject {
         if b.isWeb { migrateLegacyCache(b); return (try? String(contentsOf: Self.chapterFile(b, i), encoding: .utf8)) ?? "" }
         let c = b.chapters[i]
         let ns = text(b) as NSString
-        guard c.end <= ns.length else { return "" }
+        guard c.start >= 0, c.end >= c.start, c.end <= ns.length else { return "" }
         return ns.substring(with: NSRange(location: c.start, length: c.length))
     }
 
@@ -267,6 +283,7 @@ final class NovelStore: ObservableObject {
 
     func reloadFromDefaults() {
         textCache.removeAll()
+        migratedBooks.removeAll()
         books = Self.decode("stv.novel.books") ?? []
         progress = Self.decode("stv.novel.progress") ?? [:]
         readTime = (d.dictionary(forKey: "stv.novel.readTime") as? [String: Double]) ?? [:]

@@ -1,18 +1,24 @@
 package app.iduanju.ui.home
 
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import app.iduanju.ui.components.*
 import dev.chrisbanes.haze.hazeSource
 
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -23,7 +29,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
@@ -36,6 +44,12 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.DragHandle
+import androidx.compose.material.icons.rounded.VerticalAlignTop
+import androidx.compose.material.icons.rounded.VisibilityOff
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.zIndex
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
@@ -155,22 +169,42 @@ object HomeFmt {
 
 fun formatCount(n: Long) = HomeFmt.count(n)
 
-/** One home page: a built-in source, a 采集站 or a plugin. [key] is stable across label / order changes. */
-private data class HomePageRef(val key: String, val label: String, val target: Any)
+private enum class HomePageKind(val label: String) {
+    BUILTIN("内置"), CMS("采集站"), PLUGIN("插件"), FEATURE("功能");
+    val isImported: Boolean get() = this == CMS || this == PLUGIN
+}
 
-private fun homePages(): List<HomePageRef> {
-    // iOS HomeSource.all: [红果, 黄果, AI剧] + visible sites (采集站 / plugins) + [频道, 漫画, 小说]
+/** One home page: a built-in source, a 采集站 or a plugin. [key] is stable across label / order changes. */
+private data class HomePageRef(val key: String, val label: String, val target: Any, val kind: HomePageKind) {
+    val canHideFromHome: Boolean get() = key != HomeSource.hongguo.name
+}
+
+/** All enabled sources/features eligible for Home, including folded ones, in user's persisted custom order. */
+private fun allManageableHomePages(): List<HomePageRef> {
     val app = IdjApp.instance
     val adult = app.cms.adultUnlocked
-    fun built(s: HomeSource) = HomePageRef(s.name, s.label, s)
-    return buildList {
+    fun built(s: HomeSource, kind: HomePageKind = HomePageKind.BUILTIN) = HomePageRef(s.name, s.label, s, kind)
+    val raw = buildList {
         add(built(HomeSource.hongguo))
         if (adult) add(built(HomeSource.huangguo))
         add(built(HomeSource.ai))
-        app.cms.visibleSites.filterNot { it.origin.equals("TVBox", ignoreCase = true) || it.origin.startsWith("TVBox") }.forEach { add(HomePageRef("cms:" + it.key, it.name, it)) }
-        app.plugins.visible(adult).filter { it.type == "video" || it.type == "shortdrama" }.forEach { add(HomePageRef("plugin:" + it.id, it.name, it)) }
-        add(built(HomeSource.channels)); add(built(HomeSource.manga)); add(built(HomeSource.novel))
+        app.cms.visibleSites.filterNot { it.origin.equals("TVBox", ignoreCase = true) || it.origin.startsWith("TVBox") }
+            .forEach { add(HomePageRef("cms:" + it.key, it.name, it, HomePageKind.CMS)) }
+        app.plugins.visible(adult).filter { it.type == "video" || it.type == "shortdrama" }
+            .forEach { add(HomePageRef("plugin:" + it.id, it.name, it, HomePageKind.PLUGIN)) }
+        if (app.settings.showChannelsTab) add(built(HomeSource.channels, HomePageKind.FEATURE))
+        if (app.settings.showMangaTab) add(built(HomeSource.manga, HomePageKind.FEATURE))
+        if (app.settings.showNovelTab) add(built(HomeSource.novel, HomePageKind.FEATURE))
     }
+    val byKey = raw.associateBy { it.key }
+    return app.settings.orderedKeys(raw.map { it.key }).mapNotNull { byKey[it] }
+}
+
+private fun homePages(): List<HomePageRef> {
+    val settings = IdjApp.instance.settings
+    val all = allManageableHomePages()
+    val visible = all.filterNot { settings.isHiddenOnHome(it.key) }
+    return visible.ifEmpty { all.take(1) }
 }
 
 /** A feed tells the home header whether it is scrolled; the header then pins (iOS `onScrolled`). */
@@ -194,8 +228,14 @@ internal fun rootBottomInset(): Dp =
 @Composable
 fun HomeScreen(onOpenDetail: (String) -> Unit, onSearch: () -> Unit = {}, onPlay: (String) -> Unit = {}, onOpenManga: (String) -> Unit = {}, onImmersiveChanged: (Boolean) -> Unit = {}) {
     val c = IdjThemeColors
+    val allManageable by remember { derivedStateOf { allManageableHomePages() } }
     val pages by remember { derivedStateOf { homePages() } }
     val pager = rememberPagerState { pages.size }
+    LaunchedEffect(pages.size) {
+        if (pages.isNotEmpty() && pager.currentPage >= pages.size) {
+            pager.scrollToPage(pages.lastIndex)
+        }
+    }
     LaunchedEffect(HomeJump.label, pages.size) {
         val label = HomeJump.label ?: return@LaunchedEffect
         val i = pages.indexOfFirst { it.label == label }
@@ -255,6 +295,7 @@ fun HomeScreen(onOpenDetail: (String) -> Unit, onSearch: () -> Unit = {}, onPlay
             // header: compact single-row bar on Expanded tablets (72dp rail has top search), 2-row bar on compact/medium.
             if (!immersive) Column(Modifier.dsPinned(pinned, haze).padding(top = 6.dp)) {
                 val selectedPage = pager.currentPage.coerceIn(0, (pages.size - 1).coerceAtLeast(0))
+                val channelBtnLabel = if (allManageable.size > 7 || allManageable.size > pages.size) "频道 · ${allManageable.size}" else "频道"
                 if (metrics.useRail) {
                     Row(
                         Modifier.fillMaxWidth().padding(end = metrics.pagePadding),
@@ -273,7 +314,7 @@ fun HomeScreen(onOpenDetail: (String) -> Unit, onSearch: () -> Unit = {}, onPlay
                         ) {
                             Icon(Icons.Filled.FilterList, null, tint = c.text, modifier = Modifier.size(15.dp))
                             Spacer(Modifier.width(5.dp))
-                            Text("筛选", color = c.text, fontSize = 13.5.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                            Text(channelBtnLabel, color = c.text, fontSize = 13.5.sp, fontWeight = FontWeight.Medium, maxLines = 1)
                         }
                     }
                 } else {
@@ -293,17 +334,29 @@ fun HomeScreen(onOpenDetail: (String) -> Unit, onSearch: () -> Unit = {}, onPlay
                         Row(Modifier.fillMaxHeight().testTag("home.filter").pressClick(label = "筛选与全部频道") { HomeChannelSheetOpen.value = true }.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Filled.FilterList, null, tint = c.text, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(5.dp))
-                            Text("筛选", color = c.text, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                            Text(channelBtnLabel, color = c.text, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
                         }
                     }
                     Spacer(Modifier.height(10.dp))
                     ChannelBar(pages, selectedPage) { jumpToPage(it) }
                 }
-                if (HomeChannelSheetOpen.value) ChannelSheet(pages, selectedPage, onDismiss = { HomeChannelSheetOpen.value = false }) { page, sub ->
-                    HomeChannelSheetOpen.value = false
-                    if (sub != null) HomeSubSel.map[pages[page].label] = sub
-                    jumpToPage(page)
-                }
+                if (HomeChannelSheetOpen.value) ChannelSheet(
+                    allItems = allManageable,
+                    visibleItems = pages,
+                    currentKey = pages.getOrNull(selectedPage)?.key.orEmpty(),
+                    onDismiss = { HomeChannelSheetOpen.value = false },
+                    onPickKey = { key, sub ->
+                        val settings = IdjApp.instance.settings
+                        if (settings.isHiddenOnHome(key)) settings.setHomeHidden(key, false)
+                        HomeChannelSheetOpen.value = false
+                        val updated = homePages()
+                        val idx = updated.indexOfFirst { it.key == key }
+                        if (idx >= 0) {
+                            if (sub != null) HomeSubSel.map[updated[idx].label] = sub
+                            jumpToPage(idx)
+                        }
+                    },
+                )
             }
             HorizontalPager(
                 pager,
@@ -363,37 +416,391 @@ object HomeSubSel { val map = androidx.compose.runtime.mutableStateMapOf<String,
 /** One-shot request from another tab (我的 → Telegram 频道 / 漫画) to show a home source page. */
 object HomeJump { var label by androidx.compose.runtime.mutableStateOf<String?>(null) }
 
-/** iOS HomeChannelSheet: 「频道」 title + 完成, one section per page with its sub-channels as a 3-column grid of chips. */
+/** Unified Home Channel & Source Manager sheet: search, category filter, fold-from-home, batch cleanup, pin & reorder. */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-private fun ChannelSheet(pages: List<HomePageRef>, current: Int, onDismiss: () -> Unit, onPick: (Int, Int?) -> Unit) {
+private fun ChannelSheet(
+    allItems: List<HomePageRef>,
+    visibleItems: List<HomePageRef>,
+    currentKey: String,
+    onDismiss: () -> Unit,
+    onPickKey: (String, Int?) -> Unit,
+) {
     val c = IdjThemeColors
-    GlassBottomSheet(onDismiss, title = "频道", doneText = "完成", scroll = true) {
-        Column(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 10.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
-            pages.forEachIndexed { pi, page ->
-                val p = page.target
-                val subs: List<String> = when (p) {
-                    is HomeSource -> when (p) {
-                        HomeSource.huangguo -> listOf("视频站", "App 源")
-                        HomeSource.ai -> p.subs().map { it.subLabel } + if (IdjApp.instance.cms.adultUnlocked) listOf("黄果 AI 站") else emptyList()
-                        HomeSource.channels, HomeSource.manga -> emptyList()
-                        else -> p.subs().map { it.subLabel }
+    val settings = IdjApp.instance.settings
+    var manageMode by remember { mutableStateOf(false) }
+    var search by remember { mutableStateOf("") }
+    var filter by remember { mutableStateOf("全部") }
+
+    val hiddenItems = remember(allItems, settings.homeHidden) { allItems.filter { settings.isHiddenOnHome(it.key) } }
+    val importedItems = remember(allItems) { allItems.filter { it.kind.isImported } }
+    val cmsCount = remember(allItems) { allItems.count { it.kind == HomePageKind.CMS } }
+    val pluginCount = remember(allItems) { allItems.count { it.kind == HomePageKind.PLUGIN } }
+    val filterTabs = remember(allItems, visibleItems.size, hiddenItems.size, cmsCount, pluginCount) {
+        buildList {
+            add("全部" to allItems.size)
+            add("首页显示" to visibleItems.size)
+            if (hiddenItems.isNotEmpty()) add("已收起" to hiddenItems.size)
+            if (cmsCount > 0 || pluginCount > 0) {
+                add("内置" to allItems.count { !it.kind.isImported })
+                if (cmsCount > 0) add("采集站" to cmsCount)
+                if (pluginCount > 0) add("插件" to pluginCount)
+            }
+        }
+    }
+    val q = search.trim()
+    fun matches(item: HomePageRef): Boolean {
+        if (q.isNotEmpty() && !item.label.contains(q, true) && !item.kind.label.contains(q, true)) return false
+        return when (filter) {
+            "首页显示" -> !settings.isHiddenOnHome(item.key)
+            "已收起" -> settings.isHiddenOnHome(item.key)
+            "内置" -> !item.kind.isImported
+            "采集站" -> item.kind == HomePageKind.CMS
+            "插件" -> item.kind == HomePageKind.PLUGIN
+            else -> true
+        }
+    }
+    val filteredVisible = remember(visibleItems, q, filter, settings.homeHidden) { visibleItems.filter(::matches) }
+    val filteredHidden = remember(hiddenItems, q, filter, settings.homeHidden) { hiddenItems.filter(::matches) }
+
+    GlassBottomSheet(onDismiss, title = "频道管理", doneText = "完成", scroll = true) {
+        Column(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 14.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Text(
+                "首页显示 ${visibleItems.size} 个 · 已收起 ${hiddenItems.size} 个（收起后搜索仍可用）",
+                color = c.secondary,
+                fontSize = 12.5.sp,
+            )
+
+            SegmentedTabs(
+                items = listOf(false, true),
+                selected = manageMode,
+                label = { if (it) "管理与排序" else "快速直达" },
+                onSelect = { manageMode = it },
+            )
+
+            GlassSearchField(search, { search = it }, Modifier.fillMaxWidth(), placeholder = "搜索频道或片源名称…")
+
+            if (filterTabs.size > 2) {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(filterTabs, key = { it.first }) { (tab, count) ->
+                        ToneChip(tab, filter == tab, neutral = tab == "全部", small = true, count = count) { filter = tab }
                     }
-                    else -> listOf(page.label)
                 }
-                if (subs.isEmpty()) return@forEachIndexed
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(page.label, color = c.secondary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.semantics { heading() })
-                    subs.chunked(3).forEach { row ->
-                        Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            row.forEach { t ->
-                                val si = subs.indexOf(t)
-                                val on = pi == current && (HomeSubSel.map[page.label] ?: 0) == si
-                                SheetTile(t, on, Modifier.weight(1f).fillMaxHeight()) { onPick(pi, if (p is HomeSource && p != HomeSource.huangguo) si else null) }
+            }
+
+            if (manageMode) {
+                if (importedItems.isNotEmpty() || settings.homeOrder.isNotEmpty() || hiddenItems.isNotEmpty()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("一键整理首页顶栏", color = c.secondary, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
+                        Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (importedItems.isNotEmpty()) {
+                                val allImportedHidden = importedItems.all { settings.isHiddenOnHome(it.key) }
+                                SheetTile(
+                                    if (allImportedHidden) "展开导入源" else "仅保留内置",
+                                    !allImportedHidden,
+                                    Modifier.weight(1f).fillMaxHeight(),
+                                ) {
+                                    settings.setHomeHiddenBatch(importedItems.map { it.key }, !allImportedHidden)
+                                }
                             }
-                            repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+                            if (hiddenItems.isNotEmpty()) {
+                                SheetTile("全部显示", false, Modifier.weight(1f).fillMaxHeight()) { settings.clearHomeHidden() }
+                            }
+                            if (settings.homeOrder.isNotEmpty()) {
+                                SheetTile("默认顺序", false, Modifier.weight(1f).fillMaxHeight()) { settings.resetHomeOrder() }
+                            }
                         }
                     }
+                }
+
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("功能频道开关", color = c.secondary, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
+                    Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        SheetTile("频道", settings.showChannelsTab, Modifier.weight(1f).fillMaxHeight()) { settings.updateShowChannelsTab(!settings.showChannelsTab) }
+                        SheetTile("漫画", settings.showMangaTab, Modifier.weight(1f).fillMaxHeight()) { settings.updateShowMangaTab(!settings.showMangaTab) }
+                        SheetTile("小说", settings.showNovelTab, Modifier.weight(1f).fillMaxHeight()) { settings.updateShowNovelTab(!settings.showNovelTab) }
+                        SheetTile("底部音乐", settings.showMusicTab, Modifier.weight(1f).fillMaxHeight()) { settings.updateShowMusicTab(!settings.showMusicTab) }
+                    }
+                }
+
+                if (filteredVisible.isNotEmpty()) {
+                    var draggingKey by remember { mutableStateOf<String?>(null) }
+                    var dragOffsetY by remember { mutableFloatStateOf(0f) }
+                    val latestVisible by rememberUpdatedState(visibleItems)
+                    val latestFiltered by rememberUpdatedState(filteredVisible)
+                    val rowHeightPx = with(LocalDensity.current) { 52.dp.toPx() }
+                    val haptic = LocalHapticFeedback.current
+
+                    fun onDragDelta(itemKey: String, dy: Float) {
+                        dragOffsetY += dy
+                        val filt = latestFiltered
+                        val curFiltIdx = filt.indexOfFirst { it.key == itemKey }
+                        if (curFiltIdx < 0) return
+                        val targetFiltIdx = when {
+                            dragOffsetY > rowHeightPx * 0.52f && curFiltIdx + 1 < filt.size -> curFiltIdx + 1
+                            dragOffsetY < -rowHeightPx * 0.52f && curFiltIdx - 1 >= 0 -> curFiltIdx - 1
+                            else -> -1
+                        }
+                        if (targetFiltIdx >= 0) {
+                            val full = latestVisible
+                            val fromFull = full.indexOfFirst { it.key == itemKey }
+                            val toFull = full.indexOfFirst { it.key == filt[targetFiltIdx].key }
+                            if (fromFull >= 0 && toFull >= 0) {
+                                val next = full.toMutableList()
+                                val tmp = next[fromFull]; next[fromFull] = next[toFull]; next[toFull] = tmp
+                                settings.updateHomeOrder(next.map { it.key })
+                                dragOffsetY += if (targetFiltIdx > curFiltIdx) -rowHeightPx else rowHeightPx
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            }
+                        }
+                    }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("首页已显示（${filteredVisible.size}）", color = c.secondary, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
+                            Text("长按或拖 ≡ 排序", color = c.tertiary, fontSize = 11.5.sp)
+                        }
+                        Column(Modifier.fillMaxWidth().dsCard(16.dp)) {
+                            filteredVisible.forEachIndexed { idx, item ->
+                                key(item.key) {
+                                    val fullIdx = visibleItems.indexOfFirst { it.key == item.key }
+                                    val isDragging = draggingKey == item.key
+                                    Box(
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .height(52.dp)
+                                            .zIndex(if (isDragging) 10f else 0f)
+                                            .graphicsLayer {
+                                                translationY = if (isDragging) dragOffsetY else 0f
+                                                scaleX = if (isDragging) 1.02f else 1f
+                                                scaleY = if (isDragging) 1.02f else 1f
+                                            }
+                                            .then(
+                                                if (isDragging) Modifier
+                                                    .shadow(10.dp, RoundedCornerShape(14.dp))
+                                                    .clip(RoundedCornerShape(14.dp))
+                                                    .background(c.card)
+                                                    .border(1.2.dp, c.accent.copy(alpha = 0.8f), RoundedCornerShape(14.dp))
+                                                else Modifier
+                                            )
+                                            .pointerInput(item.key) {
+                                                detectDragGesturesAfterLongPress(
+                                                    onDragStart = {
+                                                        draggingKey = item.key
+                                                        dragOffsetY = 0f
+                                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                    },
+                                                    onDrag = { change, dragAmount ->
+                                                        change.consume()
+                                                        onDragDelta(item.key, dragAmount.y)
+                                                    },
+                                                    onDragEnd = { draggingKey = null; dragOffsetY = 0f },
+                                                    onDragCancel = { draggingKey = null; dragOffsetY = 0f },
+                                                )
+                                            },
+                                    ) {
+                                        Row(
+                                            Modifier.fillMaxSize().padding(horizontal = 10.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        ) {
+                                            // Instant drag handle (touch-drag immediately with zero wait)
+                                            Box(
+                                                Modifier
+                                                    .size(30.dp, 48.dp)
+                                                    .pointerInput(item.key) {
+                                                        detectVerticalDragGestures(
+                                                            onDragStart = {
+                                                                draggingKey = item.key
+                                                                dragOffsetY = 0f
+                                                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                            },
+                                                            onVerticalDrag = { change, dragAmount ->
+                                                                change.consume()
+                                                                onDragDelta(item.key, dragAmount)
+                                                            },
+                                                            onDragEnd = { draggingKey = null; dragOffsetY = 0f },
+                                                            onDragCancel = { draggingKey = null; dragOffsetY = 0f },
+                                                        )
+                                                    },
+                                                contentAlignment = Alignment.Center,
+                                            ) {
+                                                Icon(
+                                                    Icons.Rounded.DragHandle,
+                                                    "拖动排序 ${item.label}",
+                                                    tint = if (isDragging) c.accent else c.tertiary,
+                                                    modifier = Modifier.size(18.dp),
+                                                )
+                                            }
+                                            Text(
+                                                "${idx + 1}",
+                                                color = if (idx == 0) c.accent else c.tertiary,
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.width(20.dp),
+                                                textAlign = TextAlign.Center,
+                                            )
+                                            Text(
+                                                item.label,
+                                                color = c.text,
+                                                fontSize = 14.5.sp,
+                                                fontWeight = if (isDragging) FontWeight.SemiBold else FontWeight.Medium,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f),
+                                            )
+                                            if (item.kind.isImported) DSTag(item.kind.label)
+                                            PlainIconButton(
+                                                Icons.Rounded.VerticalAlignTop,
+                                                "置顶 ${item.label}",
+                                                tint = if (fullIdx > 0) c.secondary else c.tertiary.copy(alpha = 0.3f),
+                                                iconSize = 18.dp,
+                                            ) {
+                                                if (fullIdx > 0) {
+                                                    val next = visibleItems.toMutableList()
+                                                    val picked = next.removeAt(fullIdx)
+                                                    next.add(0, picked)
+                                                    settings.updateHomeOrder(next.map { it.key })
+                                                }
+                                            }
+                                            if (item.canHideFromHome) {
+                                                PlainIconButton(
+                                                    Icons.Rounded.VisibilityOff,
+                                                    "从首页收起 ${item.label}",
+                                                    tint = c.secondary,
+                                                    iconSize = 17.dp,
+                                                ) {
+                                                    settings.setHomeHidden(item.key, true)
+                                                }
+                                            }
+                                        }
+                                        if (!isDragging && idx < filteredVisible.lastIndex) {
+                                            Hairline(Modifier.align(Alignment.BottomCenter).padding(start = 44.dp))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (filteredHidden.isNotEmpty()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("已从首页收起（${filteredHidden.size} · 搜索仍可用）", color = c.secondary, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
+                        Column(Modifier.fillMaxWidth().dsCard(16.dp)) {
+                            filteredHidden.forEachIndexed { idx, item ->
+                                Row(
+                                    Modifier.fillMaxWidth().heightIn(min = 46.dp).padding(horizontal = 14.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    Text(
+                                        item.label,
+                                        color = c.secondary,
+                                        fontSize = 14.5.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    DSTag(item.kind.label)
+                                    Row(
+                                        Modifier.clip(CircleShape).background(c.accentSoft)
+                                            .pressClick(0.96f) { settings.setHomeHidden(item.key, false) }
+                                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                    ) {
+                                        Icon(Icons.Rounded.Add, null, tint = c.accent, modifier = Modifier.size(14.dp))
+                                        Text("放回首页", color = c.accent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                    }
+                                }
+                                if (idx < filteredHidden.lastIndex) Hairline(Modifier.padding(start = 14.dp))
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Mode 1: 快速直达
+                if (filteredVisible.isNotEmpty()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("首页频道（${filteredVisible.size}）", color = c.secondary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.semantics { heading() })
+                            if (importedItems.isNotEmpty()) {
+                                GlassTextButton("管理 / 收起 ›", color = c.accent, fontSize = 13.sp) { manageMode = true }
+                            }
+                        }
+                        filteredVisible.chunked(3).forEach { row ->
+                            Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                row.forEach { item ->
+                                    SheetTile(item.label, item.key == currentKey, Modifier.weight(1f).fillMaxHeight()) { onPickKey(item.key, null) }
+                                }
+                                repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+                            }
+                        }
+                    }
+                }
+
+                // Built-in multi-sub sections only (eliminates 50 duplicate single-chip CMS sections)
+                if (q.isEmpty() && (filter == "全部" || filter == "内置" || filter == "首页显示")) {
+                    visibleItems.filter(::matches).forEach { page ->
+                        val p = page.target as? HomeSource ?: return@forEach
+                        val subs: List<String> = when (p) {
+                            HomeSource.huangguo -> listOf("视频站", "App 源")
+                            HomeSource.ai -> p.subs().map { it.subLabel } + if (IdjApp.instance.cms.adultUnlocked) listOf("黄果 AI 站") else emptyList()
+                            HomeSource.hongguo -> p.subs().map { it.subLabel }
+                            else -> emptyList()
+                        }
+                        if (subs.size <= 1) return@forEach
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Text("${page.label} · 板块", color = c.secondary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.semantics { heading() })
+                            subs.chunked(3).forEach { row ->
+                                Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    row.forEach { t ->
+                                        val si = subs.indexOf(t)
+                                        val on = page.key == currentKey && (HomeSubSel.map[page.label] ?: 0) == si
+                                        SheetTile(t, on, Modifier.weight(1f).fillMaxHeight()) { onPickKey(page.key, if (p != HomeSource.huangguo) si else null) }
+                                    }
+                                    repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (filteredHidden.isNotEmpty()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("已收起的片源（${filteredHidden.size} · 点按放回并打开）", color = c.secondary, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
+                        filteredHidden.chunked(3).forEach { row ->
+                            Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                row.forEach { item ->
+                                    Box(
+                                        Modifier.weight(1f).fillMaxHeight()
+                                            .pressClick(0.97f) { onPickKey(item.key, null) }
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(c.glass.copy(alpha = 0.65f))
+                                            .dashedCapsuleBorder(c.hairline, width = 1.dp, dash = 4.dp, gap = 3.dp)
+                                            .heightIn(min = 42.dp)
+                                            .padding(horizontal = 6.dp, vertical = 8.dp),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Text(item.label, color = c.secondary, fontSize = 13.5.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
+                                repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+                            }
+                        }
+                    }
+                }
+
+                if (filteredVisible.isEmpty() && filteredHidden.isEmpty()) {
+                    Text(
+                        "没有匹配的频道或片源",
+                        color = c.tertiary,
+                        fontSize = 14.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                    )
                 }
             }
         }
@@ -404,9 +811,11 @@ private fun ChannelSheet(pages: List<HomePageRef>, current: Int, onDismiss: () -
 @Composable
 private fun SheetTile(text: String, on: Boolean, modifier: Modifier, onClick: () -> Unit) {
     val c = IdjThemeColors
-    Box(modifier.pressClick(0.97f, onClick = onClick).clip(RoundedCornerShape(10.dp)).background(if (on) c.accentSoft else c.glass)
+    Box(modifier.pressClick(0.97f, onClick = onClick).clip(RoundedCornerShape(12.dp))
+        .background(if (on) c.text else c.glass)
+        .border(0.9.dp, if (on) c.accent.copy(alpha = 0.55f) else c.hairline, RoundedCornerShape(12.dp))
         .semantics { selected = on }.heightIn(min = 44.dp).padding(horizontal = 6.dp, vertical = 8.dp), contentAlignment = Alignment.Center) {
-        Text(text, color = if (on) c.accent else c.text, fontSize = 15.sp, fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal,
+        Text(text, color = if (on) c.bg else c.text, fontSize = 14.5.sp, fontWeight = if (on) FontWeight.Bold else FontWeight.Medium,
             textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }
@@ -436,29 +845,78 @@ private fun ChannelBar(items: List<HomePageRef>, selected: Int, onSelect: (Int) 
     }
 }
 
-/** `.ttabs`: selected 24 sp heavy with a 26×4 accent bar under its leading edge (never clips CJK glyphs). */
+/** Yimeng-inspired editorial channel tab: 24 sp heavy ink + hand-drawn scribble ring & wavy crayon underline. */
 @Composable
 private fun ChannelTab(label: String, on: Boolean, onClick: () -> Unit) {
     val c = IdjThemeColors
-    val bar = animateFloatAsState(if (on) 1f else 0f, DS.select(), label = "channelBar")
+    val drawn = remember { Animatable(if (on) 1f else 0f) }
+    LaunchedEffect(on) {
+        if (on) {
+            drawn.snapTo(0.02f)
+            drawn.animateTo(1f, tween(460, easing = FastOutSlowInEasing))
+        } else {
+            drawn.snapTo(0f)
+        }
+    }
     Box(
         Modifier.heightIn(min = 44.dp)
             .selectable(on, remember { MutableInteractionSource() }, null, role = Role.Tab, onClick = onClick)
             .semantics { contentDescription = "home.channel.$label" },
         contentAlignment = Alignment.BottomStart,
     ) {
-        Text(
-            label,
-            color = if (on) c.text else c.secondary,
-            fontSize = if (on) 24.sp else 17.sp,
-            fontWeight = if (on) FontWeight.ExtraBold else FontWeight.Normal,
-            modifier = Modifier.padding(bottom = 6.dp),
-            maxLines = 1,
-            softWrap = false,
-        )
-        Box(Modifier.offset(x = 1.dp).size(26.dp, 4.dp).graphicsLayer {
-            alpha = bar.value.coerceIn(0f, 1f); scaleX = bar.value.coerceAtLeast(0f); transformOrigin = TransformOrigin(0f, 0.5f)
-        }.clip(CircleShape).background(c.accent))
+        Box(
+            Modifier.padding(bottom = 7.dp).drawBehind {
+                val p = drawn.value.coerceIn(0f, 1f)
+                if (p > 0.03f) {
+                    val cx = size.width / 2f
+                    val cy = size.height / 2f
+                    val rx = size.width * 0.56f + 6.dp.toPx()
+                    val ry = size.height * 0.54f + 2.dp.toPx()
+                    val fullPath = androidx.compose.ui.graphics.Path()
+                    for (k in 0..32) {
+                        val t = k.toFloat() / 32f
+                        val ang = t * 2.0 * kotlin.math.PI * 1.08 - 0.35
+                        val wob = (1.0 + 0.045 * kotlin.math.sin(ang * 3.0 + label.hashCode())).toFloat()
+                        val x = cx + kotlin.math.cos(ang).toFloat() * wob * rx
+                        val y = cy + kotlin.math.sin(ang).toFloat() * wob * ry
+                        if (k == 0) fullPath.moveTo(x, y) else fullPath.lineTo(x, y)
+                    }
+                    val pm = androidx.compose.ui.graphics.PathMeasure()
+                    pm.setPath(fullPath, false)
+                    val seg = androidx.compose.ui.graphics.Path()
+                    pm.getSegment(0f, pm.length * p, seg, true)
+                    drawPath(seg, color = c.accent.copy(alpha = 0.28f), style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.4.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round))
+                }
+            },
+        ) {
+            Text(
+                label,
+                color = if (on) c.text else c.secondary,
+                fontSize = if (on) 24.sp else 17.sp,
+                fontWeight = if (on) FontWeight.ExtraBold else FontWeight.Normal,
+                maxLines = 1,
+                softWrap = false,
+            )
+        }
+        if (drawn.value > 0.03f) {
+            androidx.compose.foundation.Canvas(
+                Modifier.offset(x = 1.dp).size(34.dp, 7.dp),
+            ) {
+                val fullPath = androidx.compose.ui.graphics.Path().apply {
+                    moveTo(2f, size.height * 0.72f)
+                    quadraticTo(size.width * 0.48f, size.height * 0.12f, size.width - 2f, size.height * 0.52f)
+                }
+                val pm = androidx.compose.ui.graphics.PathMeasure()
+                pm.setPath(fullPath, false)
+                val seg = androidx.compose.ui.graphics.Path()
+                pm.getSegment(0f, pm.length * drawn.value.coerceIn(0f, 1f), seg, true)
+                drawPath(
+                    path = seg,
+                    color = c.accent,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3.2.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round),
+                )
+            }
+        }
     }
 }
 
@@ -634,7 +1092,10 @@ private fun HeroPage(i: Int, s: HGSeries, board: String, count: Int, pager: Page
         PosterArt(s.cover, Modifier.size(m.poster, m.poster * 4 / 3), badge = HomeFmt.progress(s)?.let { DS.spaced(it) })
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f).fillMaxHeight().padding(top = 3.dp, bottom = 1.dp)) {
-            Text(heroKicker(board, i), Modifier.testTag("home.hero.kicker.$i"), color = HeroGold, style = HeroKicker, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                app.iduanju.ui.components.DoodleSparkle(Color(0xFFC8F542), size = 9.dp)
+                Text(heroKicker(board, i), Modifier.testTag("home.hero.kicker.$i"), color = Color(0xFFC8F542), style = HeroKicker, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
             Text(s.title, Modifier.padding(top = 6.dp).testTag("home.hero.title.$i"), color = Color.White, style = HeroTitle, maxLines = 2, overflow = TextOverflow.Ellipsis)
             heroMeta(s).forEachIndexed { j, line ->
                 Text(line, Modifier.padding(top = if (j == 0) 7.dp else 0.dp).testTag("home.hero.meta.$i.$j"),
@@ -668,8 +1129,8 @@ private fun HeroCta(i: Int, m: HeroMetrics, style: TextStyle, resumeFraction: Fl
                     Text(HERO_CTA, Modifier.weight(1f).testTag("home.hero.ctaText.$i"), color = Color(0xFF111317), style = style, maxLines = 1, softWrap = false)
                 }
                 if (resumeFraction > 0.01f) {
-                    Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.5.dp).background(Color(0xFF286DEF).copy(alpha = 0.20f))) {
-                        Box(Modifier.fillMaxHeight().fillMaxWidth(resumeFraction.coerceIn(0.06f, 1f)).background(Color(0xFF286DEF)))
+                    Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.5.dp).background(Color(0xFFC8F542).copy(alpha = 0.24f))) {
+                        Box(Modifier.fillMaxHeight().fillMaxWidth(resumeFraction.coerceIn(0.06f, 1f)).background(Color(0xFFC8F542)))
                     }
                 }
             }
@@ -692,8 +1153,8 @@ private fun HeroDots(i: Int, count: Int, pager: PagerState) {
     val current = pager.currentPage
     Row(Modifier.testTag("home.hero.dots.$i").semantics { contentDescription = "第 ${current + 1} 部，共 $count 部" }, horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
         repeat(count) { n ->
-            val w by animateDpAsState(if (n == current) 14.dp else 5.dp, DS.select(), label = "dot")
-            Box(Modifier.size(w, 5.dp).clip(CircleShape).background(if (n == current) Color.White else Color.White.copy(0.4f)))
+            val w by animateDpAsState(if (n == current) 16.dp else 5.dp, DS.select(), label = "dot")
+            Box(Modifier.size(w, 5.dp).clip(CircleShape).background(if (n == current) Color(0xFFC8F542) else Color.White.copy(0.38f)))
         }
     }
 }

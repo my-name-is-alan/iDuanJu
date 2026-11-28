@@ -946,23 +946,48 @@ internal fun NovelSourcesPage(
     onToggle: (NovelSource, Boolean) -> Unit,
     onDelete: (NovelSource) -> Unit,
     loading: Boolean = false,
+    onLogin: (NovelSource) -> Unit = {},
+    onDebug: (NovelSource) -> Unit = {},
+    onEdit: (NovelSource) -> Unit = {},
+    onCheckAll: () -> Unit = {},
+    onReplaceRules: () -> Unit = {},
 ) {
     val c = IdjThemeColors
+    val context = androidx.compose.ui.platform.LocalContext.current
     var filter by remember { mutableStateOf("全部") }
+    var search by remember { mutableStateOf("") }
     val enabledCount = remember(sources) { sources.count { it.enabled } }
-    val needsLogin = remember(sources) { sources.filter { it.json.optString("loginUrl").isNotBlank() }.mapTo(HashSet()) { it.id } }
-    val shown = remember(sources, filter) {
-        when (filter) {
+    val needsLogin = remember(sources) { sources.filter { it.hasLogin }.mapTo(HashSet()) { it.id } }
+    val jsSources = remember(sources) { sources.filter { it.isJsSource }.mapTo(HashSet()) { it.id } }
+    val checks = remember(sources) { app.iduanju.core.novel.LegadoTools.allChecks() }
+    val failedIds = remember(sources, checks) { sources.filter { checks[it.id]?.let { r -> r.status != app.iduanju.core.novel.LegadoTools.CheckStatus.OK } == true }.mapTo(HashSet()) { it.id } }
+    val shown = remember(sources, filter, search, failedIds) {
+        val base = when (filter) {
             "已启用" -> sources.filter { it.enabled }
             "需登录" -> sources.filter { it.id in needsLogin }
+            "JS源" -> sources.filter { it.id in jsSources }
+            "校验失败" -> sources.filter { it.id in failedIds }
             else -> sources
         }
+        val q = search.trim()
+        if (q.isEmpty()) base else base.filter { it.name.contains(q, true) || it.id.contains(q, true) || it.group.contains(q, true) }
     }
     Column(Modifier.fillMaxSize().dsAmbient(cool = true).statusBarsPadding()) {
-        DSNavBar("书源", leading = { BackButton(onClick = onBack) }, trailing = { RoundIconButton(Icons.Rounded.Add, "导入书源", Tone.Accent, onClick = onAdd) })
-        Text("共 ${sources.size} 个书源 · 已启用 $enabledCount 个", color = c.secondary, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp))
-        Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf("全部", "已启用", "需登录").forEach { f ->
+        DSNavBar(
+            "书源",
+            leading = { BackButton(onClick = onBack) },
+            trailing = {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    RoundIconButton(Icons.Rounded.AutoFixHigh, "替换净化", onClick = onReplaceRules)
+                    RoundIconButton(Icons.Rounded.FactCheck, "批量校验", onClick = onCheckAll)
+                    RoundIconButton(Icons.Rounded.Add, "导入书源", Tone.Accent, onClick = onAdd)
+                }
+            },
+        )
+        Text("共 ${sources.size} 个书源 · 已启用 $enabledCount 个", color = c.secondary, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp))
+        GlassSearchField(search, { search = it }, Modifier.padding(horizontal = 16.dp, vertical = 4.dp), placeholder = "搜索书源名称、域名或分组")
+        Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("全部", "已启用", "需登录", "JS源", "校验失败").forEach { f ->
                 ToneChip(
                     f,
                     f == filter,
@@ -970,20 +995,37 @@ internal fun NovelSourcesPage(
                     count = when (f) {
                         "已启用" -> enabledCount
                         "需登录" -> needsLogin.size
+                        "JS源" -> jsSources.size
+                        "校验失败" -> failedIds.size
                         else -> sources.size
                     },
                 ) { filter = f }
             }
         }
-        // A collection can hold more than a thousand sources: every row is its own lazy item drawing one slice of the card.
         LazyColumn(
-            Modifier.padding(top = 16.dp).fillMaxSize(),
+            Modifier.padding(top = 6.dp).fillMaxSize(),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()),
         ) {
             if (loading) items(6, key = { "skeleton$it" }, contentType = { "skeleton" }) { SkeletonBlock(Modifier.padding(vertical = 5.dp).fillMaxWidth().height(58.dp), 18.dp) }
-            else if (sources.isEmpty()) item(key = "empty") { EmptyNovel("还没有书源", "添加 Legado 文本书源，即可搜索与浏览榜单。") }
+            else if (sources.isEmpty()) item(key = "empty") { EmptyNovel("还没有书源", "导入 Legado 书源 JSON 或单文件 .js 书源，即可搜索与浏览榜单。") }
             itemsIndexed(shown, key = { _, s -> s.id }, contentType = { _, _ -> "source" }) { i, s ->
-                SourceRow(s, s.id in needsLogin, first = i == 0, last = i == shown.lastIndex, onToggle, onDelete)
+                SourceRow(
+                    s = s,
+                    needsLogin = s.id in needsLogin,
+                    checkResult = checks[s.id],
+                    first = i == 0,
+                    last = i == shown.lastIndex,
+                    onToggle = onToggle,
+                    onDelete = onDelete,
+                    onLogin = onLogin,
+                    onDebug = onDebug,
+                    onEdit = onEdit,
+                    onExport = { sc ->
+                        val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        val raw = if (sc.isJsSource) sc.mainJs else sc.json.toString(2)
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText(sc.name, raw))
+                    },
+                )
             }
         }
     }
@@ -993,30 +1035,55 @@ internal fun NovelSourcesPage(
 private fun SourceRow(
     s: NovelSource,
     needsLogin: Boolean,
+    checkResult: app.iduanju.core.novel.LegadoTools.CheckResult?,
     first: Boolean,
     last: Boolean,
     onToggle: (NovelSource, Boolean) -> Unit,
     onDelete: (NovelSource) -> Unit,
+    onLogin: (NovelSource) -> Unit,
+    onDebug: (NovelSource) -> Unit,
+    onEdit: (NovelSource) -> Unit,
+    onExport: (NovelSource) -> Unit,
 ) {
     val c = IdjThemeColors
     var menu by remember { mutableStateOf(false) }
     val host = remember(s.id) { runCatching { java.net.URI(s.id).host }.getOrNull().orEmpty() }
+    val loggedIn = remember(s.id, needsLogin) { needsLogin && app.iduanju.core.novel.LegadoLogin.isLoggedIn(s) }
+    val kindLabel = when {
+        s.isJsSource -> "JS源"
+        s.isRSS -> "RSS"
+        s.isImage -> "漫画"
+        s.isFile -> "下载"
+        s.bookSourceType == 1 -> "有声"
+        s.bookSourceType == 4 -> "视频"
+        else -> null
+    }
     val top = if (first) 18.dp else 0.dp
     val bottom = if (last) 18.dp else 0.dp
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(top, top, bottom, bottom)).background(c.card).padding(start = 14.dp, end = 6.dp)) {
         if (!first) Hairline(Modifier.padding(end = 8.dp))
         Row(Modifier.fillMaxWidth().heightIn(min = 66.dp).padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(s.name, color = c.text, fontSize = 16.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-                    if (needsLogin) DSStatus("需登录", StatusTone.Warn)
+                    kindLabel?.let { DSStatus(it, StatusTone.Accent) }
+                    if (needsLogin) DSStatus(if (loggedIn) "已登录" else "需登录", if (loggedIn) StatusTone.Ok else StatusTone.Warn)
+                    checkResult?.let { cr ->
+                        DSStatus(if (cr.status == app.iduanju.core.novel.LegadoTools.CheckStatus.OK) "${cr.latencyMs}ms" else cr.status.label, if (cr.status == app.iduanju.core.novel.LegadoTools.CheckStatus.OK) StatusTone.Ok else StatusTone.Warn)
+                    }
                 }
-                Text(host, color = c.secondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                val sub = listOfNotNull(s.group.takeIf { it.isNotBlank() }, host.takeIf { it.isNotBlank() }).joinToString(" · ")
+                Text(sub.ifBlank { s.id }, color = c.secondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
+            if (needsLogin && !loggedIn) MiniButton("登录") { onLogin(s) }
             GlassSwitch(s.enabled, { onToggle(s, it) }, label = s.name)
             Box {
                 PlainIconButton(Icons.Rounded.MoreVert, "更多", tint = c.secondary) { menu = true }
                 GlassMenu(menu, { menu = false }) {
+                    if (needsLogin) GlassMenuItem("书源登录", icon = Icons.Rounded.Person) { menu = false; onLogin(s) }
+                    GlassMenuItem("单源调试", icon = Icons.Rounded.BugReport) { menu = false; onDebug(s) }
+                    GlassMenuItem("编辑源码", icon = Icons.Rounded.Code) { menu = false; onEdit(s) }
+                    GlassMenuItem("复制导出", icon = Icons.Rounded.ContentCopy) { menu = false; onExport(s) }
                     GlassMenuItem("删除书源", icon = Icons.Rounded.DeleteOutline, destructive = true) { menu = false; onDelete(s) }
                 }
             }

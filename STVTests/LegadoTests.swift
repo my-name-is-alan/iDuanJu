@@ -419,11 +419,13 @@ final class RealRankRegressionTests: XCTestCase {
     override func tearDown() { LegadoHTTP.transport = nil }
     /// Multiline request options are part of book identity, not a list of links.
     func testUnsupportedFormatsAreNotBadSources() throws {
-        for kind in [2,3] {
-            let raw="{\"bookSourceUrl\":\"https://example.org\",\"bookSourceType\":\(kind),\"exploreUrl\":\"/catalog\"}"
-            let source=try XCTUnwrap(LegadoSourceStore.parse(Data(raw.utf8)).first)
-            XCTAssertFalse(source.supported)
+        for kind in [2, 3] {
+            let raw = "{\"bookSourceUrl\":\"https://example.org\",\"bookSourceType\":\(kind),\"exploreUrl\":\"/catalog\"}"
+            let source = try XCTUnwrap(LegadoSourceStore.parse(Data(raw.utf8)).first)
+            XCTAssertTrue(source.supported, "image(2) and file(3) book sources are now supported")
         }
+        let unknown = try XCTUnwrap(LegadoSourceStore.parse(Data(#"{"bookSourceUrl":"https://example.org","bookSourceType":99,"exploreUrl":"/catalog"}"#.utf8)).first)
+        XCTAssertFalse(unknown.supported)
         XCTAssertTrue(try XCTUnwrap(LegadoSourceStore.parse(Data(#"[{"sourceUrl":"https://example.org","ruleArticles":"a"}]"#.utf8)).first).isRSS)
         for raw in [#"{"sites":[],"spider":"x.jar"}"#] {
             XCTAssertThrowsError(try LegadoSourceStore.parse(Data(raw.utf8))) { error in

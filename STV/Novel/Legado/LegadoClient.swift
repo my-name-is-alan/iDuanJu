@@ -21,18 +21,24 @@ struct LegadoBookInfo: Hashable {
     var kind: String
     var latest: String
     var tocURL: String
+    var wordCount: String = ""
+    var updateTime: String = ""
+    var downloadUrls: [String] = []
 }
 
 struct LegadoChapter: Codable, Hashable {
     var title: String
     var url: String
     var index: Int? = nil
+    var isVolume: Bool = false
+    var isVip: Bool = false
+    var isPay: Bool = false
+    var updateTime: String = ""
 }
 
-/// Chapter text cleanup: HTML → paragraphs.
+/// Chapter text cleanup: HTML → paragraphs (optionally preserving `<img src="resolved"/>`).
 enum LegadoContent {
     static func text(fromHTML h0: String) -> String {
-        // Escaped markup (`&lt;br/&gt;`) is unescaped first so its tags become line breaks too.
         let h = h0.contains("&lt;") && !h0.contains("<") ? HTMLText.decodeEntities(h0) : h0
         guard h.contains("<") else { return HTMLText.decodeEntities(h) }
         var s = h.replacingOccurrences(of: "<(script|style)[\\s\\S]*?</\\1>", with: "", options: [.regularExpression, .caseInsensitive])
@@ -43,6 +49,48 @@ enum LegadoContent {
 
     static func clean(_ raw: String) -> String {
         NovelImport.normalize(text(fromHTML: raw))
+    }
+
+    /// Preserves inline `<img src="resolvedURL"/>` lines for illustrated novels and manga (`bookSourceType == 2`).
+    static func cleanPreservingImages(_ raw: String, baseURL: String) -> String {
+        guard !raw.isEmpty else { return "" }
+        guard raw.range(of: "<img\\b", options: [.regularExpression, .caseInsensitive]) != nil else { return clean(raw) }
+        let re = try? NSRegularExpression(pattern: #"<img\b[^>]*>"#, options: [.caseInsensitive])
+        guard let re else { return clean(raw) }
+        var work = raw
+        var tags: [String] = []
+        let matches = re.matches(in: work, range: NSRange(work.startIndex..., in: work))
+        for m in matches.reversed() {
+            guard let r = Range(m.range, in: work) else { continue }
+            let tag = String(work[r])
+            let src = extractAttr("data-src", from: tag) ?? extractAttr("data-original", from: tag) ?? extractAttr("src", from: tag) ?? ""
+            if !src.isEmpty {
+                let resolved = LegadoURL.absolute(src, base: baseURL)
+                let idx = tags.count
+                tags.append("<img src=\"\(resolved)\"/>")
+                work.replaceSubrange(r, with: "\n__IDJ_IMG_\(idx)__\n")
+            } else {
+                work.replaceSubrange(r, with: "")
+            }
+        }
+        var out = clean(work)
+        for (idx, tag) in tags.enumerated() {
+            out = out.replacingOccurrences(of: "__IDJ_IMG_\(idx)__", with: tag)
+        }
+        return out
+    }
+
+    private static func extractAttr(_ name: String, from tag: String) -> String? {
+        let pat = #"\b"# + name + #"\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))"#
+        guard let re = try? NSRegularExpression(pattern: pat, options: [.caseInsensitive]),
+              let m = re.firstMatch(in: tag, range: NSRange(tag.startIndex..., in: tag)) else { return nil }
+        for i in 1...3 {
+            if m.range(at: i).location != NSNotFound, let r = Range(m.range(at: i), in: tag) {
+                let v = String(tag[r]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !v.isEmpty && !v.hasPrefix("data:image/gif;base64,R0lGOD") { return v }
+            }
+        }
+        return nil
     }
 }
 
@@ -203,7 +251,8 @@ enum LegadoClient {
     }
 
     static func explore(_ s: LegadoSource, category: ExploreCategory, page: Int = 1) throws -> [LegadoSearchItem] {
-        if s.isRSS { return try LegadoRSS.list(s, url:category.url, key:"", page:page) }
+        if s.isRSS { return try LegadoRSS.list(s, url: category.url, key: "", page: page) }
+        if s.isJsSource { return try LegadoJsSource.search(s, key: "", page: page, category: category) }
         var source = s
         source.searchUrl = category.url
         source.ruleSearch = (s.ruleSearch ?? [:]).merging((s.ruleExplore ?? [:]).filter { !$0.value.isEmpty }) { _, new in new }
@@ -243,14 +292,20 @@ enum LegadoClient {
     }
 
     static func search(_ s: LegadoSource, key: String, page: Int = 1, allowDetailFallback: Bool = true) throws -> [LegadoSearchItem] {
-        if s.isRSS { return try LegadoRSS.list(s, url:s.searchUrl, key:key, page:page) }
+        if s.isRSS { return try LegadoRSS.list(s, url: s.searchUrl, key: key, page: page) }
+        if s.isJsSource { return try LegadoJsSource.search(s, key: key, page: page) }
         let ctx = LegadoContext(source: s)
         ctx.key = key
         ctx.page = page
         guard let url = s.searchUrl, !url.isEmpty else { return [] }
         let r = try LegadoURL.request(url, ctx: ctx, base: s.bookSourceUrl)
-        let resp = try loginChecked(s, try r.fetch(), ctx: ctx)
+        let resp = try loginChecked(s, try r.fetch(source: s), ctx: ctx)
         let base = resp.url.absoluteString
+        if allowDetailFallback, let pat = s.bookUrlPattern, !pat.isEmpty,
+           base.range(of: pat, options: .regularExpression) != nil,
+           let detailInfo = try? info(s, html: resp.text, url: base, ctx: ctx), !detailInfo.name.isEmpty {
+            return [LegadoSearchItem(name: detailInfo.name, author: detailInfo.author, kind: detailInfo.kind, intro: detailInfo.intro, cover: detailInfo.cover, latest: detailInfo.latest, bookURL: base, sourceURL: s.bookSourceUrl, sourceName: s.bookSourceName)]
+        }
         let rules = s.ruleSearch ?? [:]
         guard !(rules["bookList"] ?? "").isEmpty, !(rules["name"] ?? "").isEmpty, !(rules["bookUrl"] ?? "").isEmpty else {
             throw LegadoError.rule("\(s.bookSourceName)：缺少书籍列表、书名或详情地址规则")
@@ -263,7 +318,6 @@ enum LegadoClient {
             func f(_ k: String) -> String { (try? a.string(rules[k] ?? "")) ?? "" }
             let name = clean(stripInvisible(try a.string(rules["name"] ?? "")))
             guard !name.isEmpty else { continue }
-            // Legado reads URL rules with getString0: several matches (`a@href` hitting two links) give the first one.
             let rawBookURL = Self.firstRequestURL(try a.string(rules["bookUrl"] ?? ""))
             guard !rawBookURL.isEmpty else { continue }
             let bookURL = LegadoURL.absolute(rawBookURL, base: base)
@@ -271,7 +325,6 @@ enum LegadoClient {
                     intro: f("intro"), cover: LegadoURL.absolute(Self.firstLine(f("coverUrl")), base: base), latest: f("lastChapter"),
                     bookURL: bookURL, sourceURL: s.bookSourceUrl, sourceName: s.bookSourceName))
         }
-        // Some sites jump straight to the book page when there is one hit.
         if allowDetailFallback, out.isEmpty, let info = try? info(s, html: resp.text, url: base, ctx: ctx), !info.name.isEmpty {
             out.append(LegadoSearchItem(name: info.name, author: info.author, kind: info.kind, intro: info.intro, cover: info.cover,
                     latest: info.latest, bookURL: base, sourceURL: s.bookSourceUrl, sourceName: s.bookSourceName))
@@ -280,11 +333,12 @@ enum LegadoClient {
     }
 
     static func info(_ s: LegadoSource, bookURL: String) throws -> LegadoBookInfo {
-        if s.isRSS { return try LegadoRSS.info(s,url:bookURL) }
+        if s.isRSS { return try LegadoRSS.info(s, url: bookURL) }
+        if s.isJsSource { return try LegadoJsSource.info(s, bookURL: bookURL) }
         let ctx = LegadoContext(source: s)
-        ctx.book = ["bookUrl": bookURL]
+        ctx.book = ["bookUrl": bookURL, "origin": s.bookSourceUrl, "originName": s.bookSourceName]
         let r = try LegadoURL.request(bookURL, ctx: ctx, base: s.bookSourceUrl)
-        let resp = try loginChecked(s, try r.fetch(), ctx: ctx)
+        let resp = try loginChecked(s, try r.fetch(source: s), ctx: ctx)
         return try info(s, html: resp.text, url: resp.url.absoluteString, ctx: ctx, original: bookURL)
     }
 
@@ -295,20 +349,31 @@ enum LegadoClient {
             a = LegadoAnalyzer(first, baseURL: url, ctx: ctx)
         }
         func f(_ k: String) -> String { (try? a.string(rules[k] ?? "")) ?? "" }
-        // Name rules can persist book variables (e.g. 七猫's bid) used by toc/content.
         let name = clean(f("name"))
         let toc = f("tocUrl")
+        let dl = f("downloadUrls").components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.map { LegadoURL.absolute($0, base: url) }
         return LegadoBookInfo(name: name, author: cleanAuthor(f("author")), intro: f("intro"),
             cover: LegadoURL.absolute(f("coverUrl"), base: url), kind: f("kind").replacingOccurrences(of: "\n", with: " · "),
-            latest: f("lastChapter"), tocURL: toc.isEmpty ? (original ?? url) : LegadoURL.absolute(toc, base: url))
+            latest: f("lastChapter"), tocURL: toc.isEmpty ? (original ?? url) : LegadoURL.absolute(toc, base: url),
+            wordCount: f("wordCount"), updateTime: f("updateTime"), downloadUrls: dl)
     }
 
-    /// Chapter list, following `nextTocUrl` (up to 100 pages). A `-` before `chapterList` reverses it.
+    /// Chapter list, following `nextTocUrl` (up to 100 pages). Supports `preUpdateJs`, `formatJs`, `isVip`, `isPay`, `updateTime`.
     static func toc(_ s: LegadoSource, tocURL: String, book: [String: Any] = [:]) throws -> [LegadoChapter] {
-        if s.isRSS { return [LegadoChapter(title:try LegadoRSS.info(s,url:tocURL).name,url:tocURL)] }
+        if s.isRSS { return [LegadoChapter(title: try LegadoRSS.info(s, url: tocURL).name, url: tocURL)] }
+        if s.isJsSource { return try LegadoJsSource.toc(s, tocURL: tocURL, book: book) }
         let ctx = LegadoContext(source: s)
-        ctx.book = book
+        var b = book
+        if b["bookUrl"] == nil { b["bookUrl"] = tocURL }
+        b["tocUrl"] = tocURL; b["origin"] = s.bookSourceUrl; b["originName"] = s.bookSourceName
+        ctx.book = b
         let rules = s.ruleToc ?? [:]
+        if let pre = rules["preUpdateJs"]?.trimmingCharacters(in: .whitespacesAndNewlines), !pre.isEmpty {
+            let code = pre.hasPrefix("@js:") ? String(pre.dropFirst(4)) : pre.replacingOccurrences(of: "<js>", with: "").replacingOccurrences(of: "</js>", with: "")
+            _ = try? ctx.evalJS(code, result: nil, baseURL: tocURL)
+        }
+        let formatJs = rules["formatJs"]?.trimmingCharacters(in: .whitespacesAndNewlines).legadoNonBlank
+        let bookName = b["name"] as? String ?? ""
         var out: [LegadoChapter] = []
         var next: [String] = [tocURL]
         var seen = Set<String>()
@@ -316,17 +381,27 @@ enum LegadoClient {
             next.removeFirst()
             guard seen.insert(u).inserted else { continue }
             let r = try LegadoURL.request(u, ctx: ctx, base: s.bookSourceUrl)
-            let resp = try loginChecked(s, try r.fetch(), ctx: ctx)
+            let resp = try loginChecked(s, try r.fetch(source: s), ctx: ctx)
             let base = resp.url.absoluteString
             let page = LegadoAnalyzer(resp.text, baseURL: base, ctx: ctx)
             for el in try page.elements(rules["chapterList"] ?? "") {
                 let a = LegadoAnalyzer(el, baseURL: base, ctx: ctx)
-                let isVolume = (try? a.string(rules["isVolume"] ?? "")) ?? ""
-                if isVolume == "true" || isVolume == "1" { continue }
-                let title = ((try? a.string(rules["chapterName"] ?? "")) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let isVolumeStr = ((try? a.string(rules["isVolume"] ?? "")) ?? "").lowercased()
+                let isVolume = isVolumeStr == "true" || isVolumeStr == "1"
+                let isVipStr = ((try? a.string(rules["isVip"] ?? "")) ?? "").lowercased()
+                let isPayStr = ((try? a.string(rules["isPay"] ?? "")) ?? "").lowercased()
+                let chTime = (try? a.string(rules["updateTime"] ?? "")) ?? ""
+                var title = ((try? a.string(rules["chapterName"] ?? "")) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 let cu = (try? a.string(rules["chapterUrl"] ?? "")) ?? ""
-                guard !title.isEmpty else { continue }
-                out.append(LegadoChapter(title: title, url: cu.isEmpty ? base : LegadoURL.absolute(cu, base: base),index:out.count))
+                guard !title.isEmpty, (!isVolume || !cu.isEmpty) else { continue }
+                if let fjs = formatJs {
+                    let code = fjs.hasPrefix("@js:") ? String(fjs.dropFirst(4)) : fjs.replacingOccurrences(of: "<js>", with: "").replacingOccurrences(of: "</js>", with: "")
+                    if let formatted = (try? ctx.evalJS(code, result: title, baseURL: base, extra: ["index": out.count, "title": title])).map(LegadoAnalyzer.textOf), !formatted.isEmpty {
+                        title = formatted
+                    }
+                }
+                title = LegadoReplaceStore.shared.applyTitle(title, bookName: bookName, sourceURL: s.bookSourceUrl, sourceName: s.bookSourceName)
+                out.append(LegadoChapter(title: title, url: cu.isEmpty ? base : LegadoURL.absolute(cu, base: base), index: out.count, isVolume: isVolume, isVip: isVipStr == "true" || isVipStr == "1", isPay: isPayStr == "true" || isPayStr == "1", updateTime: chTime))
             }
             if let nr = rules["nextTocUrl"], !nr.isEmpty {
                 for n in (try? page.strings(nr)) ?? [] {
@@ -338,46 +413,88 @@ enum LegadoClient {
         return out
     }
 
-    /// Chapter text, following `nextContentUrl` until it reaches the next chapter (up to 30 pages).
+    /// Chapter text, following `nextContentUrl` (up to 30 pages). Supports webJs/sourceRegex, title, subContent, `@js:` replaceRegex, inline images & ReplaceRule.
     static func content(_ s: LegadoSource, chapter: LegadoChapter, nextChapterURL: String?, book: [String: Any] = [:]) throws -> String {
         if s.isMedia { throw LegadoError.rule("媒体源必须进入原生播放，不能当作文本缓存") }
-        if s.isRSS { return try LegadoRSS.content(s,url:chapter.url) }
+        if s.isRSS { return try LegadoRSS.content(s, url: chapter.url) }
+        if s.isJsSource { return try LegadoJsSource.content(s, chapter: chapter, nextChapterURL: nextChapterURL, book: book) }
         let ctx = LegadoContext(source: s)
         ctx.book = book
-        ctx.chapter = ["title": chapter.title, "url": chapter.url, "index": chapter.index ?? 0]
-        ctx.nextChapterURL=nextChapterURL
+        ctx.chapter = ["title": chapter.title, "url": chapter.url, "index": chapter.index ?? 0, "isVolume": chapter.isVolume, "isVip": chapter.isVip, "isPay": chapter.isPay]
+        ctx.nextChapterURL = nextChapterURL
         let rules = s.ruleContent ?? [:]
+        let webJs = rules["webJs"]?.legadoNonBlank
+        let sourceRegex = rules["sourceRegex"]?.legadoNonBlank
         var parts: [String] = []
+        var extractedTitle = ""
+        var subText = ""
         var url: String? = chapter.url
         var seen = Set<String>()
         while let u = url, seen.count < 30, seen.insert(u).inserted {
             let r = try LegadoURL.request(u, ctx: ctx, base: s.bookSourceUrl)
-            let resp = try loginChecked(s, try r.fetch(), ctx: ctx)
-            // Source rules use URL fragments as chapter IDs; HTTP never sends them to the server.
+            let resp = try loginChecked(s, try r.fetch(source: s, contentWebJs: webJs, contentSourceRegex: sourceRegex), ctx: ctx)
             var base = resp.url.absoluteString
             if let fragment = URL(string: u)?.fragment, !fragment.isEmpty {
                 base = base.components(separatedBy: "#")[0] + "#" + fragment
             }
             let a = LegadoAnalyzer(resp.text, baseURL: base, ctx: ctx)
-            parts.append(try a.strings(rules["content"] ?? "").joined(separator: "\n"))
+            let raw = try a.strings(rules["content"] ?? "").joined(separator: "\n")
+            parts.append(LegadoContent.cleanPreservingImages(raw, baseURL: base))
+            if extractedTitle.isEmpty, let tr = rules["title"], !tr.isEmpty {
+                extractedTitle = (try? a.string(tr)) ?? ""
+            }
+            if subText.isEmpty, let sr = rules["subContent"], !sr.isEmpty, let rawSub = try? a.string(sr), !rawSub.isEmpty {
+                subText = LegadoContent.clean(rawSub)
+            }
             url = nil
             if let nr = rules["nextContentUrl"], !nr.isEmpty, let n = try? a.string(nr), !n.isEmpty {
                 let abs = LegadoURL.absolute(n.components(separatedBy: "\n")[0], base: base)
                 if abs != nextChapterURL, !seen.contains(abs) { url = abs }
             }
         }
-        let combined = parts.joined(separator: "\n")
-        var text = LegadoContent.clean(combined)
-        if let rr = rules["replaceRegex"], !rr.isEmpty {
-            for piece in rr.components(separatedBy: "\n") where !piece.isEmpty {
-                let p = piece.hasPrefix("##") ? String(piece.dropFirst(2)) : piece
-                let kv = p.components(separatedBy: "##")
-                text = LegadoAnalyzer.replace(text, kv[0], kv.count > 1 ? kv[1] : "", firstOnly: false)
+        var text = parts.filter { !$0.isEmpty }.joined(separator: "\n")
+        if !subText.isEmpty { text = text.isEmpty ? subText : text + "\n\n" + subText }
+        if let rr = rules["replaceRegex"]?.trimmingCharacters(in: .whitespacesAndNewlines), !rr.isEmpty {
+            if rr.lowercased().contains("@js:") || rr.lowercased().contains("<js>") {
+                let a = LegadoAnalyzer(text, baseURL: chapter.url, ctx: ctx)
+                text = try a.string(rr)
+            } else {
+                for piece in rr.components(separatedBy: "\n") where !piece.isEmpty {
+                    let firstOnly = piece.hasSuffix("###")
+                    let p = piece.hasPrefix("##") ? String(piece.dropFirst(2)) : piece
+                    let kv = p.components(separatedBy: "##")
+                    text = LegadoAnalyzer.replace(text, kv[0], kv.count > 1 ? kv[1] : "", firstOnly: firstOnly)
+                }
             }
-            text = NovelImport.normalize(text)
         }
-        guard !text.isEmpty else { throw LegadoError.empty(combined.range(of: "<img\\b", options: [.regularExpression, .caseInsensitive]) != nil ? "本章是图片页，当前文本阅读器无法显示，请换文字版书源" : "正文为空") }
+        let bookName = book["name"] as? String ?? ""
+        text = LegadoReplaceStore.shared.applyContent(text, bookName: bookName, sourceURL: s.bookSourceUrl, sourceName: s.bookSourceName)
+        text = LegadoContent.cleanPreservingImages(text, baseURL: chapter.url)
+        if !extractedTitle.isEmpty && !text.hasPrefix(extractedTitle) {
+            text = extractedTitle + "\n" + text
+        }
+        guard !text.isEmpty else { throw LegadoError.empty("正文为空") }
         return text
+    }
+
+    static func contentBatch(_ s: LegadoSource, chapters: [LegadoChapter], book: [String: Any] = [:]) throws -> [String: String] {
+        guard !chapters.isEmpty, !s.isMedia, !s.isRSS else { return [:] }
+        if s.isJsSource { return try LegadoJsSource.contentBatch(s, chapters: chapters, book: book) }
+        guard let rawRule = s.ruleContent?["contentBatch"]?.trimmingCharacters(in: .whitespacesAndNewlines), !rawRule.isEmpty else { return [:] }
+        let code = rawRule.hasPrefix("@js:") ? String(rawRule.dropFirst(4)) : rawRule.replacingOccurrences(of: "<js>", with: "").replacingOccurrences(of: "</js>", with: "")
+        let ctx = LegadoContext(source: s)
+        ctx.book = book
+        let batch = LegadoBatchContext(chapters: chapters)
+        ctx.batch = batch
+        let chArr = chapters.map { ["title": $0.title, "url": $0.url, "index": $0.index ?? 0] as [String: Any] }
+        _ = try ctx.evalJS(code, result: chArr, baseURL: s.bookSourceUrl, extra: ["chapters": chArr])
+        let bookName = book["name"] as? String ?? ""
+        var out: [String: String] = [:]
+        for (u, raw) in batch.asMap() {
+            let c = LegadoReplaceStore.shared.applyContent(LegadoContent.cleanPreservingImages(raw, baseURL: u), bookName: bookName, sourceURL: s.bookSourceUrl, sourceName: s.bookSourceName)
+            if !c.isEmpty { out[u] = c }
+        }
+        return out
     }
 
     private static func clean(_ s: String) -> String {
@@ -400,11 +517,15 @@ enum LegadoClient {
 
     /// `loginUrl` as JS (function definitions), without the @js: / <js> wrapper; nil when it is a plain URL.
     static func loginJS(_ s: LegadoSource) -> String? {
-        guard var t = s.loginUrl?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
-        if t.hasPrefix("@js:") { t.removeFirst(4) }
-        else if t.hasPrefix("<js>") { t = t.replacingOccurrences(of: "<js>", with: "").replacingOccurrences(of: "</js>", with: "") }
-        else if t.hasPrefix("http") || t.hasPrefix("/") { return nil }
-        return t
+        if let raw = s.loginUrl?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            var t = raw
+            if t.hasPrefix("@js:") { t.removeFirst(4) }
+            else if t.hasPrefix("<js>") { t = t.replacingOccurrences(of: "<js>", with: "").replacingOccurrences(of: "</js>", with: "") }
+            else if t.hasPrefix("http") || t.hasPrefix("/") { return nil }
+            return t
+        }
+        if s.isJsSource && LegadoJsSource.hasLogin(s) { return s.mainJs }
+        return nil
     }
 
     /// The loginUi form (Legado accepts non-strict JSON, so it goes through JS first).
@@ -446,5 +567,12 @@ enum LegadoClient {
             t.qualityOfService = .userInitiated
             t.start()
         }
+    }
+}
+
+private extension String {
+    var legadoNonBlank: String? {
+        let t = trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
     }
 }

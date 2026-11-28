@@ -14,6 +14,13 @@ struct WatchProgress: Codable, Hashable, Identifiable {
     var resumeLabel: String { series.source.isLongVideo ? "看到 " + Fmt.clock(Int(seconds)) : "看到第\(episodeNumber)集" }
 }
 
+/// LWW tombstone metadata so deleted or cleared search history never resurrects on WebDAV / backup sync.
+struct SearchHistoryMeta: Codable, Equatable {
+    var added: [String: Int64] = [:]
+    var deleted: [String: Int64] = [:]
+    var clearedAt: Int64 = 0
+}
+
 /// Local-only watch history + favorites, persisted as JSON in UserDefaults.
 @MainActor
 final class LibraryStore: ObservableObject {
@@ -31,12 +38,14 @@ final class LibraryStore: ObservableObject {
     @Published private(set) var allFavorites: [HGSeries] = []
     var favorites: [HGSeries] { allFavorites.filter { SourceGate.shared.isVisible($0) } }
     @Published private(set) var searchHistory: [String] = []
+    private(set) var searchHistoryMeta: SearchHistoryMeta = SearchHistoryMeta()
 
     private let d = UserDefaults.standard
     private init() {
         progress = load("stv.progress") ?? [:]
         allFavorites = load("stv.favorites") ?? []
         searchHistory = load("stv.searchHistory") ?? []
+        searchHistoryMeta = load("stv.searchHistoryMeta") ?? SearchHistoryMeta()
     }
 
     var continueWatching: [WatchProgress] {
@@ -129,12 +138,91 @@ final class LibraryStore: ObservableObject {
     }
 
     func addSearch(_ q: String) {
-        let t = q.trimmingCharacters(in: .whitespaces); guard !t.isEmpty else { return }
+        let t = q.trimmingCharacters(in: .whitespacesAndNewlines); guard !t.isEmpty else { return }
+        let now = Int64(Date().timeIntervalSince1970 * 1000.0)
         searchHistory.removeAll { $0 == t }; searchHistory.insert(t, at: 0)
-        searchHistory = Array(searchHistory.prefix(10)); save(searchHistory, "stv.searchHistory")
+        searchHistory = Array(searchHistory.prefix(10))
+        searchHistoryMeta.added[t] = now
+        searchHistoryMeta.deleted.removeValue(forKey: t)
+        trimSearchMeta()
+        saveSearchState()
     }
-    func removeSearch(_ q: String) { searchHistory.removeAll { $0 == q }; save(searchHistory, "stv.searchHistory") }
-    func clearSearch() { searchHistory = []; save(searchHistory, "stv.searchHistory") }
+    func removeSearch(_ q: String) {
+        let t = q.trimmingCharacters(in: .whitespacesAndNewlines); guard !t.isEmpty else { return }
+        let now = Int64(Date().timeIntervalSince1970 * 1000.0)
+        searchHistory.removeAll { $0 == q || $0.trimmingCharacters(in: .whitespacesAndNewlines) == t }
+        searchHistoryMeta.added.removeValue(forKey: q)
+        searchHistoryMeta.added.removeValue(forKey: t)
+        searchHistoryMeta.deleted[t] = now
+        trimSearchMeta()
+        saveSearchState()
+    }
+    func clearSearch() {
+        let now = Int64(Date().timeIntervalSince1970 * 1000.0)
+        for item in searchHistory {
+            let t = item.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty { searchHistoryMeta.deleted[t] = now }
+        }
+        searchHistory = []
+        searchHistoryMeta.added.removeAll()
+        searchHistoryMeta.clearedAt = now
+        trimSearchMeta()
+        saveSearchState()
+    }
+
+    private func trimSearchMeta() {
+        let active = Set(searchHistory)
+        searchHistoryMeta.added = searchHistoryMeta.added.filter { active.contains($0.key) }
+        if searchHistoryMeta.deleted.count > 100 {
+            let keep = searchHistoryMeta.deleted.sorted { $0.value > $1.value }.prefix(100)
+            searchHistoryMeta.deleted = Dictionary(uniqueKeysWithValues: keep.map { ($0.key, $0.value) })
+        }
+    }
+
+    private func saveSearchState() {
+        save(searchHistory, "stv.searchHistory")
+        save(searchHistoryMeta, "stv.searchHistoryMeta")
+    }
+
+    nonisolated static func mergeSearchHistory(
+        localItems: [String],
+        localMeta: SearchHistoryMeta,
+        incomingItems: [String],
+        incomingMeta: SearchHistoryMeta,
+        limit: Int = 10
+    ) -> ([String], SearchHistoryMeta) {
+        let clearedAt = max(localMeta.clearedAt, incomingMeta.clearedAt)
+        var deleted = localMeta.deleted
+        for (k, v) in incomingMeta.deleted where v > (deleted[k] ?? 0) { deleted[k] = v }
+        var added = localMeta.added
+        for (k, v) in incomingMeta.added where v > (added[k] ?? 0) { added[k] = v }
+
+        var seen = Set<String>()
+        var candidates: [String] = []
+        for raw in localItems + incomingItems {
+            let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty && seen.insert(t).inserted { candidates.append(t) }
+        }
+
+        let alive = candidates.filter { term in
+            let addedTs = added[term] ?? 0
+            let deletedTs = deleted[term] ?? 0
+            if deletedTs > 0 {
+                return addedTs > deletedTs && addedTs > clearedAt
+            } else if clearedAt > 0 {
+                return addedTs > clearedAt
+            } else {
+                return true
+            }
+        }.sorted { (added[$0] ?? 0) > (added[$1] ?? 0) }
+        let limited = Array(alive.prefix(limit))
+        let aliveSet = Set(limited)
+        let trimmedAdded = added.filter { aliveSet.contains($0.key) }
+        let trimmedDeleted: [String: Int64] = deleted.count > 100
+            ? Dictionary(uniqueKeysWithValues: deleted.sorted { $0.value > $1.value }.prefix(100).map { ($0.key, $0.value) })
+            : deleted
+        return (limited, SearchHistoryMeta(added: trimmedAdded, deleted: trimmedDeleted, clearedAt: clearedAt))
+    }
 
     func reloadFromDefaults() {
         writes += 1
@@ -144,6 +232,7 @@ final class LibraryStore: ObservableObject {
         progress = load("stv.progress") ?? [:]
         allFavorites = load("stv.favorites") ?? []
         searchHistory = load("stv.searchHistory") ?? []
+        searchHistoryMeta = load("stv.searchHistoryMeta") ?? SearchHistoryMeta()
     }
 
     private func load<T: Decodable>(_ k: String) -> T? { d.data(forKey: k).flatMap { try? JSONDecoder().decode(T.self, from: $0) } }

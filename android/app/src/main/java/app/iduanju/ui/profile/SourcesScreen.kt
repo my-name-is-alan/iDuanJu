@@ -6,6 +6,9 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MenuBook
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -41,6 +44,23 @@ fun SourcesScreen(onBack: () -> Unit) {
     SettingsPage("片源管理", onBack) {
         Group("内置") {
             BuiltinRow("红果短剧", ProfileIcons.play)
+        }
+        Group("首页功能频道", footer = "可按个人使用习惯开启或隐藏首页顶部的频道、漫画、小说、音乐标签；关闭后仍可在「我的」或设置中随时重新开启。") {
+            SwitchRow("频道", ProfileIcons.telegram, "显示首页「频道」标签", ia.settings.showChannelsTab) {
+                ia.settings.updateShowChannelsTab(it)
+            }
+            RowDivider()
+            SwitchRow("漫画", ProfileIcons.manga, "显示首页「漫画」标签", ia.settings.showMangaTab) {
+                ia.settings.updateShowMangaTab(it)
+            }
+            RowDivider()
+            SwitchRow("小说", Icons.Filled.MenuBook, "显示首页「小说」标签", ia.settings.showNovelTab) {
+                ia.settings.updateShowNovelTab(it)
+            }
+            RowDivider()
+            SwitchRow("底部音乐入口", Icons.Filled.MusicNote, "在底部导航栏（平板侧栏）显示独立「音乐」标签", ia.settings.showMusicTab) {
+                ia.settings.updateShowMusicTab(it)
+            }
         }
         Group("成人内容（默认隐藏）", footer = "开启后黄果、标记为成人的采集站 / 插件 / Telegram 频道 / 漫画插件才会出现在首页、搜索、频道与漫画；所有结果一律过滤未成年人与非自愿题材。") {
             SwitchRow("显示成人片源", ProfileIcons.film, "黄果短剧、成人采集站 / 插件 / 频道 / 漫画 · 仅限年满 18 周岁", adult) {

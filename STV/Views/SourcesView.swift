@@ -31,6 +31,10 @@ struct SourcesView: View {
                             showHomeOrder = true
                         }
                         .accessibilityIdentifier("sources.homeOrder")
+                        DSToggleRow("显示「频道」标签", isOn: Binding(get: { gate.showChannelsTab }, set: { gate.setShowChannelsTab($0) }), icon: "paperplane")
+                        DSToggleRow("显示「漫画」标签", isOn: Binding(get: { gate.showMangaTab }, set: { gate.setShowMangaTab($0) }), icon: "book")
+                        DSToggleRow("显示「小说」标签", isOn: Binding(get: { gate.showNovelTab }, set: { gate.setShowNovelTab($0) }), icon: "text.book.closed")
+                        DSToggleRow("底部导航显示「音乐」", isOn: Binding(get: { gate.showMusicTab }, set: { gate.setShowMusicTab($0) }), icon: "music.note", subtitle: "在底部导航栏（平板侧栏）显示独立音乐入口")
                     }
                     DSSection("18+ 片源（默认隐藏）", separatorInset: 58) {
                         DSToggleRow(DramaSource.huangguo.label, isOn: Binding(get: { gate.huangguo }, set: { gate.setHuangguo($0) }), icon: "film.stack",

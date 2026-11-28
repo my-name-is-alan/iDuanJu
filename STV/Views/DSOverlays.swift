@@ -487,12 +487,20 @@ struct DSEmptyState: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            Image(systemName: systemImage)
-                .font(.system(size: 26, weight: .medium)).foregroundStyle(STVTheme.accent)
-                .frame(width: 64, height: 64).background(Circle().fill(STVTheme.accentSoft))
-                .padding(.bottom, 4)
-                .accessibilityHidden(true)
-            Text(title).dsFont(17, .semibold, relativeTo: .headline).foregroundStyle(STVTheme.text).multilineTextAlignment(.center)
+            ZStack {
+                Circle().fill(STVTheme.accentSoft)
+                YMScribbleCircle(seed: UInt64(abs(title.hashValue) % 97 + 13))
+                    .stroke(STVTheme.accent.opacity(0.80), style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
+                    .padding(-3)
+                Image(systemName: systemImage)
+                    .font(.system(size: 26, weight: .semibold)).foregroundStyle(STVTheme.accent)
+            }
+            .frame(width: 66, height: 66)
+            .padding(.bottom, 4)
+            .accessibilityHidden(true)
+            Text(title).dsFont(17, .bold, relativeTo: .headline).foregroundStyle(STVTheme.text).multilineTextAlignment(.center)
+            YMAnimatedWave(waves: 3, color: STVTheme.accent.opacity(0.50), lineWidth: 1.8, speed: 1.8)
+                .frame(width: 54, height: 8)
             if let message {
                 Text(message).dsFont(13, relativeTo: .footnote).foregroundStyle(STVTheme.secondary).multilineTextAlignment(.center).lineSpacing(3)
             }

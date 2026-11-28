@@ -104,37 +104,41 @@ enum LegadoJSONPath {
         return []
     }
 
-    /// `@.a.b == 'x' && @.c > 3`, `@.k` (exists / truthy).
+    /// `@.a.b == 'x' && @.c > 3 || @.d`, `@.k` (exists / truthy).
     private static func filter(_ expr: String, _ item: Any) -> Bool {
-        for part in expr.components(separatedBy: "&&") {
-            let e = part.trimmingCharacters(in: .whitespaces)
-            var op: String?
-            for o in ["==", "!=", "<=", ">=", "<", ">", "=~"] where e.contains(o) { op = o; break }
-            guard let op else {
-                let v = read(item, "$" + e.dropFirst(e.hasPrefix("@") ? 1 : 0)).first
-                if v == nil || (v as? Bool) == false || v is NSNull { return false }
-                continue
+        for orBranch in expr.components(separatedBy: "||") {
+            var branchOK = true
+            for part in orBranch.components(separatedBy: "&&") {
+                let e = part.trimmingCharacters(in: .whitespaces)
+                var op: String?
+                for o in ["==", "!=", "<=", ">=", "<", ">", "=~"] where e.contains(o) { op = o; break }
+                guard let op else {
+                    let v = read(item, "$" + e.dropFirst(e.hasPrefix("@") ? 1 : 0)).first
+                    if v == nil || (v as? Bool) == false || v is NSNull { branchOK = false; break }
+                    continue
+                }
+                let sides = e.components(separatedBy: op)
+                guard sides.count >= 2 else { branchOK = false; break }
+                let lhs = read(item, "$" + sides[0].trimmingCharacters(in: .whitespaces).dropFirst(sides[0].trimmingCharacters(in: .whitespaces).hasPrefix("@") ? 1 : 0)).first
+                let rhsRaw = sides[1...].joined(separator: op).trimmingCharacters(in: .whitespaces)
+                let l = lhs.map(LegadoJSONPath.text) ?? ""
+                let r = unquote(rhsRaw)
+                let ln = Double(l), rn = Double(r)
+                let ok: Bool
+                switch op {
+                case "==": ok = l == r
+                case "!=": ok = l != r
+                case "=~": ok = l.range(of: r.trimmingCharacters(in: CharacterSet(charactersIn: "/")), options: .regularExpression) != nil
+                case "<": ok = (ln ?? 0) < (rn ?? 0)
+                case ">": ok = (ln ?? 0) > (rn ?? 0)
+                case "<=": ok = (ln ?? 0) <= (rn ?? 0)
+                default: ok = (ln ?? 0) >= (rn ?? 0)
+                }
+                if !ok { branchOK = false; break }
             }
-            let sides = e.components(separatedBy: op)
-            guard sides.count >= 2 else { return false }
-            let lhs = read(item, "$" + sides[0].trimmingCharacters(in: .whitespaces).dropFirst(sides[0].trimmingCharacters(in: .whitespaces).hasPrefix("@") ? 1 : 0)).first
-            let rhsRaw = sides[1...].joined(separator: op).trimmingCharacters(in: .whitespaces)
-            let l = lhs.map(LegadoJSONPath.text) ?? ""
-            let r = unquote(rhsRaw)
-            let ln = Double(l), rn = Double(r)
-            let ok: Bool
-            switch op {
-            case "==": ok = l == r
-            case "!=": ok = l != r
-            case "=~": ok = l.range(of: r.trimmingCharacters(in: CharacterSet(charactersIn: "/")), options: .regularExpression) != nil
-            case "<": ok = (ln ?? 0) < (rn ?? 0)
-            case ">": ok = (ln ?? 0) > (rn ?? 0)
-            case "<=": ok = (ln ?? 0) <= (rn ?? 0)
-            default: ok = (ln ?? 0) >= (rn ?? 0)
-            }
-            if !ok { return false }
+            if branchOK { return true }
         }
-        return true
+        return false
     }
 
     /// Scalar → text; containers → compact JSON.

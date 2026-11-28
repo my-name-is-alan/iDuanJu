@@ -132,10 +132,11 @@ fun ErrorState(message: String, modifier: Modifier = Modifier, note: String? = n
 private fun StateBlock(title: String, note: String?, icon: ImageVector, actionText: String?, onAction: () -> Unit, modifier: Modifier) {
     val c = IdjThemeColors
     Column(modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        IconWell(icon, 52.dp)
-        Text(title, color = c.text, fontSize = 15.sp, lineHeight = 21.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 14.dp))
-        if (!note.isNullOrEmpty()) Text(note, color = c.secondary, fontSize = 13.sp, lineHeight = 19.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 6.dp))
-        if (actionText != null) GlassButton(actionText, Modifier.padding(top = 16.dp), ButtonTone.Tinted, ButtonSize.Regular, onClick = onAction)
+        IconWell(icon, 60.dp)
+        Text(title, color = c.text, fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 14.dp))
+        DoodleCrayonWave(c.accent.copy(alpha = 0.45f), waves = 3, modifier = Modifier.padding(top = 6.dp).size(54.dp, 8.dp))
+        if (!note.isNullOrEmpty()) Text(note, color = c.secondary, fontSize = 13.sp, lineHeight = 19.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 8.dp))
+        if (actionText != null) GlassButton(actionText, Modifier.padding(top = 16.dp), ButtonTone.Primary, ButtonSize.Regular, onClick = onAction)
     }
 }
 

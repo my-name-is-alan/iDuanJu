@@ -3,6 +3,7 @@ package app.iduanju.novel
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -45,8 +46,11 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -109,6 +113,8 @@ fun NovelScreen(onBack: () -> Unit, embedded: Boolean = false, onFullScreenChang
     var switchBusy by remember { mutableStateOf(false) }
     var switchJob by remember { mutableStateOf<Job?>(null) }
     var readGeneration by remember { mutableIntStateOf(0) }
+    var readJob by remember { mutableStateOf<Job?>(null) }
+    var readerOpen by remember { mutableStateOf(false) }
     var rankGeneration by remember { mutableIntStateOf(0) }
     var rankJob by remember { mutableStateOf<Job?>(null) }
     var prefetchJob by remember { mutableStateOf<Job?>(null) }
@@ -116,6 +122,11 @@ fun NovelScreen(onBack: () -> Unit, embedded: Boolean = false, onFullScreenChang
     var searching by remember { mutableStateOf(app.iduanju.BuildConfig.DEBUG && app.iduanju.ui.UiEvidence.page=="search") }
     var shelf by remember { mutableStateOf(!(app.iduanju.BuildConfig.DEBUG && app.iduanju.ui.UiEvidence.page=="rank")) }
     var sourcePage by remember { mutableStateOf(app.iduanju.BuildConfig.DEBUG && app.iduanju.ui.UiEvidence.page=="sources") }
+    var loginSource by remember { mutableStateOf<NovelSource?>(null) }
+    var debugSource by remember { mutableStateOf<NovelSource?>(null) }
+    var editSource by remember { mutableStateOf<NovelSource?>(null) }
+    var showBatchCheck by remember { mutableStateOf(false) }
+    var showReplaceRules by remember { mutableStateOf(false) }
     var importResult by remember { mutableStateOf<String?>(null) }
     var requestFilePicker by remember { mutableStateOf(false) }
     val cacheRoot = remember { File(context.filesDir,"novel-cache-v2") }
@@ -171,7 +182,7 @@ fun NovelScreen(onBack: () -> Unit, embedded: Boolean = false, onFullScreenChang
         searchList.requestScrollToItem(0)
         searchResults.submit(scope, sources.toList(), query)
     }
-    val fullScreen = searching || !shelf || sourcePage || currentBook != null || text.isNotEmpty()
+    val fullScreen = searching || !shelf || sourcePage || currentBook != null || readerOpen || text.isNotEmpty()
     LaunchedEffect(fullScreen) { if (embedded) onFullScreenChange(fullScreen) }
     DisposableEffect(Unit) { onDispose { if (embedded) onFullScreenChange(false) } }
     fun work(block: suspend () -> Unit) {
@@ -180,6 +191,16 @@ fun NovelScreen(onBack: () -> Unit, embedded: Boolean = false, onFullScreenChang
         scope.launch {
             try { block() } catch (e: CancellationException) { throw e } catch (e: Exception) { error = e.message ?: "操作失败" }
             finally { busy = false }
+        }
+    }
+    // Chapter jumps always preempt any slow in-flight chapter load instead of silently dropping clicks.
+    fun launchRead(block: suspend () -> Unit) {
+        readJob?.cancel()
+        val token = ++readGeneration
+        busy = true; error = null
+        readJob = scope.launch {
+            try { block() } catch (e: CancellationException) { throw e } catch (e: Exception) { if (token == readGeneration) error = e.message ?: "章节读取失败" }
+            finally { if (token == readGeneration) busy = false }
         }
     }
     // Rank/search jobs are cancellable and generation-scoped. An old source response (including
@@ -191,7 +212,17 @@ fun NovelScreen(onBack: () -> Unit, embedded: Boolean = false, onFullScreenChang
             finally{if(token==rankGeneration)busy=false}
         }
     }
-    DisposableEffect(Unit){onDispose{rankGeneration++;rankJob?.cancel()}}
+    DisposableEffect(Unit) {
+        onDispose {
+            rankGeneration++
+            readGeneration++
+            readJob?.cancel()
+            rankJob?.cancel()
+            switchJob?.cancel()
+            prefetchJob?.cancel()
+            searchResults.clear()
+        }
+    }
     fun saveSources(): Job? = if (sourcesReady) SourceMemo.save(prefs, sources.toList()) else null
     suspend fun addSources(raw: String) {
         awaitSources()
@@ -208,15 +239,17 @@ fun NovelScreen(onBack: () -> Unit, embedded: Boolean = false, onFullScreenChang
         localText = parsed.text; localRanges = parsed.chapters; localTitle = parsed.title; localAuthor = parsed.author.orEmpty()
         prefs.edit().putString("localName", localTitle).putString("localAuthor", localAuthor).apply()
         chapters = parsed.chapters.mapIndexed { i, c -> NovelChapter(c.title, "local:$i", i) }
-        chapterIndex = 0; text = parsed.text.substring(parsed.chapters.first().start, parsed.chapters.first().end)
-        localBook = true; currentBook = null
+        chapterIndex = 0
+        text = parsed.text.substring(parsed.chapters.first().start, parsed.chapters.first().end).ifBlank { "${chapters.firstOrNull()?.title.orEmpty()}\n（本章暂无内容）" }
+        localBook = true; currentBook = null; readerOpen = true
         error = null; importResult = "已导入《${parsed.title}》· ${chapters.size} 章"
     }
     suspend fun read(index: Int, selectedSource: NovelSource? = source, bookToSave: NovelHit? = currentBook) {
         if (localBook) {
             val range = localRanges.getOrNull(index) ?: return
             chapterIndex = index
-            text = localText.substring(range.start, range.end)
+            text = localText.substring(range.start, range.end).ifBlank { "${chapters.getOrNull(index)?.title.orEmpty()}\n（本章暂无内容）" }
+            readerOpen = true
             readerState.requestScrollToItem(0)
             return
         }
@@ -224,7 +257,7 @@ fun NovelScreen(onBack: () -> Unit, embedded: Boolean = false, onFullScreenChang
         val s = selectedSource ?: sourceState.value ?: return
         val chapter = chapters.getOrNull(index) ?: return
         val book = bookToSave ?: return
-        val token = ++readGeneration
+        val token = readGeneration
         prefetchJob?.cancel()
         if(s.isMedia){
             val toc=chapters.toList()
@@ -245,7 +278,7 @@ fun NovelScreen(onBack: () -> Unit, embedded: Boolean = false, onFullScreenChang
             }
         }
         if (token != readGeneration) return
-        text = body; chapterIndex = index; localBook = false
+        text = body.ifBlank { "${chapter.title}\n（本章暂无内容）" }; chapterIndex = index; localBook = false; readerOpen = true
         bookToSave?.let { book ->
             prefs.edit().putString("last", JSONObject().put("source", s.id).put("name", book.name).put("author", book.author).put("url", book.url).put("chapter", index).toString()).apply()
         }
@@ -289,7 +322,7 @@ fun NovelScreen(onBack: () -> Unit, embedded: Boolean = false, onFullScreenChang
             } ?: error("无法读取文件") }
             val name = withContext(Dispatchers.IO) { context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c -> if (c.moveToFirst()) c.getString(0) else "本地小说.txt" } ?: "本地小说.txt" }
             val probe = bytes.toString(Charsets.UTF_8).trimStart('\uFEFF', ' ', '\t', '\r', '\n')
-            if (probe.startsWith('[') || probe.startsWith('{')) addSources(NovelImport.decode(bytes)) else openLocal(bytes, name)
+            if (probe.startsWith('[') || probe.startsWith('{') || name.endsWith(".js", true) || LegadoJsSource.looksLikeJsSource(probe)) addSources(NovelImport.decode(bytes)) else openLocal(bytes, name)
         }
     }
     LaunchedEffect(importing, requestFilePicker) {
@@ -351,13 +384,33 @@ fun NovelScreen(onBack: () -> Unit, embedded: Boolean = false, onFullScreenChang
         downloadJob=scope.launch {
             try {
                 withContext(Dispatchers.IO) { cache.saveBook(s.id,book,toc,metadata) }
-                for(i in start until end) {
-                    withContext(Dispatchers.IO) {
-                        val active=currentCoroutineContext()
-                        cache.load(s.id,book.url,toc[i].url,checkActive={active.ensureActive()}) {NovelSources.content(s,toc[i],toc.getOrNull(i+1)?.url,book.url)}
+                val batchSize = if (s.supportsContentBatch) s.maxBatchSize.coerceAtLeast(2) else 1
+                var i = start
+                while (i < end) {
+                    if (batchSize > 1) {
+                        val chunkEnd = minOf(end, i + batchSize)
+                        val chunk = toc.subList(i, chunkEnd)
+                        val batchMap = runCatching { withContext(Dispatchers.IO) { NovelSources.contentBatch(s, chunk, book.url, book.name) } }.getOrDefault(emptyMap())
+                        for (j in i until chunkEnd) {
+                            withContext(Dispatchers.IO) {
+                                val active = currentCoroutineContext()
+                                cache.load(s.id, book.url, toc[j].url, checkActive = { active.ensureActive() }) {
+                                    batchMap[toc[j].url] ?: NovelSources.content(s, toc[j], toc.getOrNull(j + 1)?.url, book.url, book.name)
+                                }
+                            }
+                            downloadDone++
+                        }
+                        if (currentBook?.url == book.url && bookSource == s.id) cachedCount = withContext(Dispatchers.IO) { cache.count(s.id, book.url, toc) }
+                        i = chunkEnd
+                    } else {
+                        withContext(Dispatchers.IO) {
+                            val active = currentCoroutineContext()
+                            cache.load(s.id, book.url, toc[i].url, checkActive = { active.ensureActive() }) { NovelSources.content(s, toc[i], toc.getOrNull(i + 1)?.url, book.url, book.name) }
+                        }
+                        downloadDone++
+                        if (currentBook?.url == book.url && bookSource == s.id) cachedCount = withContext(Dispatchers.IO) { cache.count(s.id, book.url, toc) }
+                        i++
                     }
-                    downloadDone++
-                    if (currentBook?.url == book.url && bookSource == s.id) cachedCount=withContext(Dispatchers.IO){cache.count(s.id,book.url,toc)}
                 }
             } catch(e:CancellationException){error="下载已暂停，可继续";throw e} catch(e:Exception){error="下载中断：${e.message}，已完成章节保留"}
             finally { downloadBusy=false }
@@ -367,24 +420,57 @@ fun NovelScreen(onBack: () -> Unit, embedded: Boolean = false, onFullScreenChang
         val target=currentBook ?: return
         val selectedSource = bookSource
         val known = searchResults.groups.firstOrNull { g -> g.editions.any { it.source.id == selectedSource && it.book.url == target.url } }?.editions.orEmpty().filter { it.source.id != selectedSource }
-        val candidates = sources.filter { it.enabled && it.id != selectedSource && it.json.optString("searchUrl").isNotBlank() }.toList()
+        val candidates = sources.filter { it.enabled && it.id != selectedSource && (it.isJsSource || it.json.optString("searchUrl").isNotBlank()) }.toList()
         showSwitch=true
         if(switchBusy)return
         switchBusy=true;alternatives=known.map { it.source to it.book }
-        switchJob=scope.launch {
+        switchJob=scope.launch(Dispatchers.Default) {
             try {
-                coroutineScope {
-                    val gate = Semaphore(4)
-                    candidates.forEach { s -> launch {
-                        gate.withPermit {
-                            val found = try { withContext(Dispatchers.IO) { NovelSources.search(s,target.name) } }
-                                catch(e:CancellationException){throw e} catch(_:Exception){emptyList()}
-                            val matches=found.filter{it.name==target.name && (it.author==target.author || it.author.isBlank() || target.author.isBlank())}
-                            alternatives=(alternatives+matches.map{s to it}).distinctBy { it.first.id+"|"+it.second.url }
+                val accLock = Any()
+                val acc = LinkedHashMap<String, Pair<NovelSource, NovelHit>>()
+                known.forEach { acc[it.source.id + "|" + it.book.url] = it.source to it.book }
+                val queue = kotlinx.coroutines.channels.Channel<NovelSource>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+                candidates.forEach { queue.trySend(it) }
+                queue.close()
+                val dirty = java.util.concurrent.atomic.AtomicBoolean(false)
+                val flusher = launch {
+                    while (isActive) {
+                        kotlinx.coroutines.delay(250L)
+                        if (dirty.getAndSet(false)) {
+                            val snap = synchronized(accLock) { acc.values.toList() }
+                            withContext(Dispatchers.Main.immediate) { alternatives = snap }
                         }
-                    } }
+                    }
                 }
-            } finally {switchBusy=false}
+                try {
+                    val workers = List(minOf(4, candidates.size.coerceAtLeast(1))) {
+                        launch(Dispatchers.IO) {
+                            for (s in queue) {
+                                ensureActive()
+                                val found = try {
+                                    withTimeoutOrNull(10_000L) {
+                                        runInterruptible(Dispatchers.IO) { NovelSources.search(s, target.name, batchMode = true) }
+                                    }.orEmpty()
+                                } catch (e: CancellationException) { throw e } catch (_: Throwable) { emptyList() }
+                                val matches = found.filter { it.name == target.name && (it.author == target.author || it.author.isBlank() || target.author.isBlank()) }
+                                if (matches.isNotEmpty()) {
+                                    synchronized(accLock) {
+                                        matches.forEach { acc.putIfAbsent(s.id + "|" + it.url, s to it) }
+                                        dirty.set(true)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    workers.forEach { it.join() }
+                } finally {
+                    flusher.cancel()
+                    val finalSnap = synchronized(accLock) { acc.values.toList() }
+                    withContext(NonCancellable + Dispatchers.Main.immediate) { alternatives = finalSnap }
+                }
+            } finally {
+                withContext(NonCancellable + Dispatchers.Main.immediate) { switchBusy = false }
+            }
         }
     }
     fun openResult(id: String, book: NovelHit) {
@@ -404,9 +490,11 @@ fun NovelScreen(onBack: () -> Unit, embedded: Boolean = false, onFullScreenChang
     }
     fun back() {
         readGeneration++
+        readJob?.cancel()
         prefetchJob?.cancel()
         when {
-            text.isNotEmpty() -> {
+            readerOpen || text.isNotEmpty() -> {
+                readerOpen = false
                 text = ""
                 if (continuingFromShelf) { continuingFromShelf = false; currentBook = null }
             }
@@ -417,7 +505,7 @@ fun NovelScreen(onBack: () -> Unit, embedded: Boolean = false, onFullScreenChang
             else -> onBack()
         }
     }
-    androidx.activity.compose.BackHandler(enabled=!embedded || !shelf || sourcePage || searching || currentBook!=null || text.isNotEmpty()) { back() }
+    androidx.activity.compose.BackHandler(enabled=!embedded || !shelf || sourcePage || searching || currentBook!=null || readerOpen || text.isNotEmpty()) { back() }
     NovelPlayback.state?.let { active ->
         NovelMediaPlayer(active) {
             if (active.queue.key == "${source?.id}|${currentBook?.url}") chapterIndex = active.index
@@ -427,13 +515,15 @@ fun NovelScreen(onBack: () -> Unit, embedded: Boolean = false, onFullScreenChang
         return
     }
     val c=IdjThemeColors
-    if (!sourcePage && text.isNotEmpty()) {
+    if (!sourcePage && (readerOpen || text.isNotEmpty())) {
         val book=currentBook
         val id=if(localBook)"local|$localTitle|${localText.length}|${localText.hashCode()}" else source?.id.orEmpty()+"|"+(book?.url?:"local")
         NovelReaderScreen(id,if(localBook)localTitle else book?.name?:"本地小说",if(localBook)localAuthor else book?.author.orEmpty(),book?.cover.orEmpty(),if (localBook) "本地文件" else source?.name.orEmpty(),chapters,chapterIndex,text,busy,error,cachedCount,
             addedAt=remember(id,shelfEntries){shelfEntries.firstOrNull{!it.isLocal&&it.sourceId==source?.id&&it.book.url==book?.url}?.addedAt?:0},
             initialOffset=prefs.getInt("reader.offset.$id.${chapterIndex.coerceAtLeast(0)}",0),
-            onBack={back()},onChapter={i->work{read(i)}},
+            source=if(localBook) null else source,
+            bookUrl=book?.url.orEmpty(),
+            onBack={back()},onChapter={i->launchRead{read(i)}},
             onDownload={i->work{if(i!=chapterIndex)read(i);showDownload=true}},onSwitch={i->work{if(i!=chapterIndex)read(i);findSources()}},
             onPosition={i,offset->prefs.edit().putInt("reader.offset.$id.$i",offset).apply()
                 if(localBook)prefs.edit().putString("last",JSONObject().put("source","local").put("name",localTitle).put("url","local").put("chapter",i).toString()).apply()
@@ -452,7 +542,7 @@ fun NovelScreen(onBack: () -> Unit, embedded: Boolean = false, onFullScreenChang
                 if(!localBook&&sc!=null&&b!=null&&prefetch>0)prefetchJob=scope.launch(Dispatchers.IO){val active=currentCoroutineContext();for(n in NovelPrefetchPlan.indices(i,toc.size,prefetch)){active.ensureActive();try{cache.load(sc.id,b.url,toc[n].url,{active.ensureActive()}){NovelSources.content(sc,toc[n],toc.getOrNull(n+1)?.url,b.url)}}catch(e:CancellationException){throw e}catch(_:Exception){}}}}
         )
     }
-    if (!sourcePage && currentBook != null && text.isEmpty()) {
+    if (!sourcePage && currentBook != null && !readerOpen && text.isEmpty()) {
         val book = currentBook!!
         var attempt by remember(book.url, bookSource) { mutableIntStateOf(0) }
         var fetching by remember(book.url, bookSource) { mutableStateOf(bookDetails == null) }
@@ -502,7 +592,7 @@ fun NovelScreen(onBack: () -> Unit, embedded: Boolean = false, onFullScreenChang
                 else scope.launch { withContext(Dispatchers.IO) { cache.saveBook(bookSource, book, chapters, bookDetails) }; shelfRevision++; showDownload = true }
             },
             onRead = { requestedChapter ->
-                work {
+                launchRead {
                     withContext(Dispatchers.IO) { cache.saveBook(bookSource, book, chapters, bookDetails) }; shelfRevision++
                     val last = runCatching { JSONObject(prefs.getString("last", "{}")!!) }.getOrDefault(JSONObject())
                     val index = if (last.optString("source") == bookSource && last.optString("url") == book.url) last.optInt("chapter", 0).coerceIn(0, chapters.lastIndex) else 0
@@ -513,7 +603,7 @@ fun NovelScreen(onBack: () -> Unit, embedded: Boolean = false, onFullScreenChang
             mediaType = source?.json?.optInt("bookSourceType") ?: 0,
         )
     }
-    if (!sourcePage && currentBook == null && text.isEmpty()) Column(
+    if (!sourcePage && currentBook == null && !readerOpen && text.isEmpty()) Column(
         Modifier
             .fillMaxSize()
             .then(if (embedded && shelf && !searching) Modifier else Modifier.dsAmbient(cool = !shelf || searching))
@@ -535,9 +625,9 @@ fun NovelScreen(onBack: () -> Unit, embedded: Boolean = false, onFullScreenChang
                         openLocalFile()
                     } else {
                         openResult(entry.sourceId, entry.book)
-                        if (chapters.isNotEmpty()) work {
+                        if (chapters.isNotEmpty()) launchRead {
                             awaitSources()
-                            val sc = sources.firstOrNull { it.id == entry.sourceId } ?: return@work
+                            val sc = sources.firstOrNull { it.id == entry.sourceId } ?: return@launchRead
                             val last = runCatching { JSONObject(prefs.getString("last", "{}")!!) }.getOrDefault(JSONObject())
                             val index = if (last.optString("source") == entry.sourceId && last.optString("url") == entry.book.url) last.optInt("chapter") else 0
                             read(index.coerceIn(chapters.indices), sc, entry.book)
@@ -690,9 +780,51 @@ fun NovelScreen(onBack: () -> Unit, embedded: Boolean = false, onFullScreenChang
             }
         }
     }
-    if(sourcePage)NovelSourcesPage(sources.toList(),{sourcePage=false},{importResult=null;importing=true},onToggle={sc,on->
-        val i=sources.indexOfFirst{it.id==sc.id};if(i>=0)sources[i]=NovelSource(JSONObject(sc.json.toString()).put("enabled",on));saveSources()
-    },onDelete={sc->sources.removeAll{it.id==sc.id};saveSources();if(selected==sc.id)selected=sources.firstOrNull()?.id.orEmpty()},loading=!sourcesReady)
+    if(sourcePage)NovelSourcesPage(
+        sources.toList(),
+        onBack = { sourcePage = false },
+        onAdd = { importResult = null; importing = true },
+        onToggle = { sc, on ->
+            val i = sources.indexOfFirst { it.id == sc.id }
+            if (i >= 0) sources[i] = NovelSource(JSONObject(sc.json.toString()).put("enabled", on))
+            saveSources()
+        },
+        onDelete = { sc ->
+            sources.removeAll { it.id == sc.id }; saveSources()
+            if (selected == sc.id) selected = sources.firstOrNull()?.id.orEmpty()
+        },
+        loading = !sourcesReady,
+        onLogin = { loginSource = it },
+        onDebug = { debugSource = it },
+        onEdit = { editSource = it },
+        onCheckAll = { showBatchCheck = true },
+        onReplaceRules = { showReplaceRules = true },
+    )
+    loginSource?.let { sc -> NovelSourceLoginSheet(sc) { loginSource = null } }
+    debugSource?.let { sc -> NovelSourceDebugSheet(sc) { debugSource = null } }
+    editSource?.let { sc ->
+        NovelSourceEditorSheet(sc, onSave = { updated ->
+            val i = sources.indexOfFirst { it.id == sc.id }
+            if (i >= 0) sources[i] = updated else sources.add(updated)
+            saveSources()
+        }) { editSource = null }
+    }
+    if (showBatchCheck) NovelSourceCheckSheet(
+        sources = sources.filter { it.enabled },
+        onDisableInvalid = { badIds ->
+            for (i in sources.indices) {
+                if (sources[i].id in badIds) sources[i] = NovelSource(JSONObject(sources[i].json.toString()).put("enabled", false))
+            }
+            saveSources()
+        },
+        onDeleteInvalid = { badIds ->
+            sources.removeAll { it.id in badIds }
+            saveSources()
+            if (selected in badIds) selected = sources.firstOrNull()?.id.orEmpty()
+        },
+        onDismiss = { showBatchCheck = false },
+    )
+    if (showReplaceRules) NovelReplaceRulesSheet { showReplaceRules = false }
 
     if(showDownload) NovelPage("缓存与下载",{showDownload=false}) {
         NovelPanel {
@@ -788,7 +920,7 @@ private fun ColumnScope.NovelSearchPage(
     onOpen: (String, NovelHit) -> Unit,
 ) {
     val c = IdjThemeColors
-    val inFlight = results.finished < results.total
+    val inFlight = results.running && results.finished < results.total
     Box(Modifier.fillMaxWidth().dsPinned(pinned).statusBarsPadding()) {
         NovelSearchTopBar(
             value = query(),
@@ -806,12 +938,21 @@ private fun ColumnScope.NovelSearchPage(
                 if (inFlight) Box(Modifier.size(6.dp).clip(CircleShape).background(c.accent))
                 Text(
                     if (inFlight) "正在搜索 ${results.finished} / ${results.total} 个书源 · ${results.groups.size} 本"
-                    else "共 ${results.groups.size} 本 · ${results.total} 个书源",
+                    else "共 ${results.groups.size} 本 · 已搜索 ${results.finished}/${results.total} 个书源",
                     color = c.secondary,
                     fontSize = 12.sp,
                 )
                 Spacer(Modifier.weight(1f))
                 if (results.failures > 0) Text("${results.failures} 个失败", color = c.accentWarm, fontSize = 11.5.sp, fontWeight = FontWeight.Medium)
+                if (inFlight) {
+                    Text(
+                        "停止",
+                        color = c.danger,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.clip(CircleShape).clickable { results.stop() }.padding(horizontal = 8.dp, vertical = 2.dp),
+                    )
+                }
             }
             if (inFlight) {
                 Spacer(Modifier.height(7.dp))
@@ -894,7 +1035,7 @@ private fun NovelImportSheet(
             result?.let { ImportBanner(it, ok = true) }
             error?.let { ImportBanner(it, ok = false) }
             Text(
-                "支持 Legado 文本、有声、视频书源与 RSS 订阅。书源与阅读记录仅保存在当前设备。",
+                "支持 Legado 文本、有声、漫画/图文、下载、视频书源、单文件 .js 书源与 RSS 订阅。书源与阅读记录仅保存在当前设备。",
                 color = c.tertiary, fontSize = 12.sp, lineHeight = 19.sp, modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 12.dp, bottom = 12.dp),
             )
         }

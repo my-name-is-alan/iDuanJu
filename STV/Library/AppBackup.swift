@@ -78,6 +78,7 @@ enum AppBackup {
         var progress: [Progress]? = nil
         var favorites: [Favorite]? = nil
         var searchHistory: [String]? = nil
+        var searchHistoryMeta: SearchHistoryMeta? = nil
         var cmsSites: [CMSSiteItem]? = nil
         var pluginBundles: [PluginBundleItem]? = nil
         var tgChannels: [TGChannelItem]? = nil
@@ -365,6 +366,7 @@ enum AppBackup {
             NovelStore.shared.reloadFromDefaults()
             NovelPrefs.shared.reloadFromDefaults()
             TGStore.shared.reloadFromDefaults()
+            MusicStore.shared.reloadFromDefaults()
             if !decoded.legadoSources.isEmpty {
                 _ = LegadoSourceStore.shared.add(decoded.legadoSources)
             } else {
@@ -497,13 +499,9 @@ enum AppBackup {
                     let curList = d.data(forKey: key).flatMap { try? JSONDecoder().decode([HGSeries].self, from: $0) } ?? []
                     if let out = try? JSONEncoder().encode(unionByID(incList, curList, id: \.id)) { d.set(out, forKey: key) }
                 }
-            case "stv.searchHistory":
-                if let incData = value as? Data,
-                   let incList = try? JSONDecoder().decode([String].self, from: incData) {
-                    let curList = d.data(forKey: key).flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
-                    let merged = Array(unionByID(curList, incList, id: { $0 }).prefix(10))
-                    if let out = try? JSONEncoder().encode(merged) { d.set(out, forKey: key) }
-                }
+            case "stv.searchHistory", "stv.searchHistoryMeta":
+                // Handled atomically right after the loop so items and tombstones always merge together.
+                break
             case "stv.plugins.subscriptions":
                 if let incData = value as? Data,
                    let incList = try? JSONDecoder().decode([PluginSubscription].self, from: incData) {
@@ -576,6 +574,21 @@ enum AppBackup {
             default:
                 d.set(value, forKey: key)
             }
+        }
+        if incoming["stv.searchHistory"] != nil || incoming["stv.searchHistoryMeta"] != nil {
+            let curList = d.data(forKey: "stv.searchHistory").flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
+            let curMeta = d.data(forKey: "stv.searchHistoryMeta").flatMap { try? JSONDecoder().decode(SearchHistoryMeta.self, from: $0) } ?? SearchHistoryMeta()
+            let incList = (incoming["stv.searchHistory"] as? Data).flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
+            let incMeta = (incoming["stv.searchHistoryMeta"] as? Data).flatMap { try? JSONDecoder().decode(SearchHistoryMeta.self, from: $0) } ?? SearchHistoryMeta()
+            let (merged, mergedMeta) = LibraryStore.mergeSearchHistory(
+                localItems: curList,
+                localMeta: curMeta,
+                incomingItems: incList,
+                incomingMeta: incMeta,
+                limit: 10
+            )
+            if let out = try? JSONEncoder().encode(merged) { d.set(out, forKey: "stv.searchHistory") }
+            if let outMeta = try? JSONEncoder().encode(mergedMeta) { d.set(outMeta, forKey: "stv.searchHistoryMeta") }
         }
     }
 
@@ -707,6 +720,7 @@ enum AppBackup {
             progress: progs,
             favorites: favs,
             searchHistory: lib.searchHistory,
+            searchHistoryMeta: lib.searchHistoryMeta,
             cmsSites: cmsList,
             pluginBundles: bundles,
             tgChannels: tgs,
@@ -739,10 +753,20 @@ enum AppBackup {
             }
             if let out = try? JSONEncoder().encode(unionByID(incomingSeries, cur, id: \.id)) { d.set(out, forKey: "stv.favorites") }
         }
-        if let incSearch = portable.searchHistory, !incSearch.isEmpty {
+        let incSearch = portable.searchHistory ?? []
+        let incSearchMeta = portable.searchHistoryMeta ?? SearchHistoryMeta()
+        if !incSearch.isEmpty || incSearchMeta.clearedAt > 0 || !incSearchMeta.deleted.isEmpty {
             let cur = d.data(forKey: "stv.searchHistory").flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
-            let merged = Array(unionByID(cur, incSearch, id: { $0 }).prefix(10))
+            let curMeta = d.data(forKey: "stv.searchHistoryMeta").flatMap { try? JSONDecoder().decode(SearchHistoryMeta.self, from: $0) } ?? SearchHistoryMeta()
+            let (merged, mergedMeta) = LibraryStore.mergeSearchHistory(
+                localItems: cur,
+                localMeta: curMeta,
+                incomingItems: incSearch,
+                incomingMeta: incSearchMeta,
+                limit: 10
+            )
             if let out = try? JSONEncoder().encode(merged) { d.set(out, forKey: "stv.searchHistory") }
+            if let outMeta = try? JSONEncoder().encode(mergedMeta) { d.set(outMeta, forKey: "stv.searchHistoryMeta") }
         }
         if let incCms = portable.cmsSites, !incCms.isEmpty {
             let cur = d.data(forKey: "stv.cms.sites").flatMap { try? JSONDecoder().decode([CMSSite].self, from: $0) } ?? []

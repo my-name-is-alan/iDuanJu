@@ -296,21 +296,6 @@ struct PlayerFullscreenButton: View {
     }
 }
 
-/// 2 pt pure white progress line while the chrome is hidden.
-struct PlayerCompactProgress: View {
-    @ObservedObject var clock: PlaybackClock
-    var body: some View {
-        GeometryReader { g in
-            ZStack(alignment: .leading) {
-                Color.white.opacity(0.15)
-                Color.white.opacity(0.68).frame(width: g.size.width * clock.sample.fraction)
-            }
-        }
-        .frame(height: 2)
-        .accessibilityIdentifier("player.compactProgress")
-    }
-}
-
 /// 跳过片头: shown while the playhead is inside the intro.
 struct PlayerSkipIntro: View {
     @ObservedObject var clock: PlaybackClock

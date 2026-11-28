@@ -72,18 +72,47 @@ enum HomeSource: Hashable, Identifiable {
         case .channels, .manga, .novel: []
         }
     }
+    var isImported: Bool {
+        if case .site(let s) = self { return s.isDynamic }
+        return false
+    }
+    var categoryTag: String {
+        switch self {
+        case .hongguo, .huangguo, .ai: return "内置"
+        case .channels, .manga, .novel: return "功能"
+        case .site(let s):
+            if s.pluginID != nil { return "插件" }
+            if s.cmsKey != nil { return "采集站" }
+            return "内置"
+        }
+    }
+    var canHideFromHome: Bool { self != .hongguo }
     @MainActor static var defaultAll: [HomeSource] {
         let g = SourceGate.shared
         let nonTVBoxSites = g.visibleSites.filter { src in
             if let k = src.cmsKey, let s = CMSStore.site(k), s.origin == "TVBox" || s.origin.hasPrefix("TVBox") { return false }
             return true
         }
-        return [.hongguo] + (g.showHuangguo ? [.huangguo] : []) + [.ai] + nonTVBoxSites.map { .site($0) } + [.channels, .manga, .novel]
+        var list: [HomeSource] = [.hongguo]
+            + (g.showHuangguo ? [.huangguo] : [])
+            + [.ai]
+            + nonTVBoxSites.map { .site($0) }
+        if g.showChannelsTab { list.append(.channels) }
+        if g.showMangaTab { list.append(.manga) }
+        if g.showNovelTab { list.append(.novel) }
+        return list
     }
-    @MainActor static var all: [HomeSource] {
+    /// Every enabled source/feature tab eligible for Home, including ones folded off the top strip.
+    @MainActor static var allManageable: [HomeSource] {
         let raw = defaultAll
         let byKey = Dictionary(uniqueKeysWithValues: raw.map { ($0.key, $0) })
         return SourceGate.shared.orderedKeys(raw.map(\.key)).compactMap { byKey[$0] }
+    }
+    /// Active tabs actually pinned on the Home top bar & horizontal pager.
+    @MainActor static var all: [HomeSource] {
+        let g = SourceGate.shared
+        let visible = allManageable.filter { !g.isHiddenOnHome($0.key) }
+        return visible.isEmpty ? [.hongguo] : visible
     }
 }
 
@@ -230,7 +259,11 @@ struct HomeView: View {
     @State private var safeSpan: VSpan?
     @State private var showChannels = false
     @State private var reorderingSources = false
+    @State private var channelQuery = ""
+    @State private var channelFilter = "全部"
     @Environment(\.layoutMetrics) private var layout
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.railLeadingInset) private var railInset
     private var rest: VSpan? {
         guard let h = headerSpan, let s = safeSpan else { return nil }
         return VSpan(top: h.bottom, bottom: s.bottom)
@@ -287,18 +320,44 @@ struct HomeView: View {
             // GeometryReader keeps each page full-bleed (matching TabView(.page) without double safe-area insets),
             // and scrollPosition(id:) binds directly to ForEach's Identifiable ID type (String = HomeSource.key).
             GeometryReader { geo in
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 0) {
-                        ForEach(sources, id: \.key) { s in
-                            pageCell(s)
-                                .frame(width: geo.size.width, height: geo.size.height)
+                ScrollViewReader { proxy in
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 0) {
+                            ForEach(sources, id: \.key) { s in
+                                pageCell(s)
+                                    .frame(width: geo.size.width, height: geo.size.height)
+                                    .id(s.key)
+                            }
+                        }
+                        .scrollTargetLayout()
+                    }
+                    .scrollTargetBehavior(.paging)
+                    .scrollPosition(id: $scrollSourceKey)
+                    .scrollIndicators(.hidden)
+                    .task(id: Int(geo.size.width)) {
+                        guard geo.size.width > 0 else { return }
+                        if source != sources.first {
+                            proxy.scrollTo(source.key, anchor: .leading)
+                        }
+                        scrollSourceKey = source.key
+                    }
+                    .compatOnChange(of: source) { next in
+                        if !visited.contains(next) { visited.insert(next) }
+                        if scrollSourceKey != next.key {
+                            let prevIdx = scrollSourceKey.flatMap { k in sources.firstIndex(where: { $0.key == k }) }
+                            let nextIdx = sources.firstIndex(of: next)
+                            if let prevIdx, let nextIdx, abs(prevIdx - nextIdx) == 1 {
+                                withAnimation(DS.select) {
+                                    scrollSourceKey = next.key
+                                    proxy.scrollTo(next.key, anchor: .leading)
+                                }
+                            } else {
+                                scrollSourceKey = next.key
+                                proxy.scrollTo(next.key, anchor: .leading)
+                            }
                         }
                     }
-                    .scrollTargetLayout()
                 }
-                .scrollTargetBehavior(.paging)
-                .scrollPosition(id: $scrollSourceKey)
-                .scrollIndicators(.hidden)
             }
         } else {
             TabView(selection: $source) {
@@ -330,18 +389,6 @@ struct HomeView: View {
         .toolbar(.hidden, for: .navigationBar)
         .sheet(isPresented: $showChannels, onDismiss: { reorderingSources = false }) { channelPanel }
         .compatOnChange(of: sourceRevisionToken) { _ in refreshSources() }
-        .compatOnChange(of: source) { next in
-            if !visited.contains(next) { visited.insert(next) }
-            if scrollSourceKey != next.key {
-                let prevIdx = scrollSourceKey.flatMap { k in sources.firstIndex(where: { $0.key == k }) }
-                let nextIdx = sources.firstIndex(of: next)
-                if let prevIdx, let nextIdx, abs(prevIdx - nextIdx) == 1 {
-                    withAnimation(DS.select) { scrollSourceKey = next.key }
-                } else {
-                    scrollSourceKey = next.key
-                }
-            }
-        }
         .compatOnChange(of: scrollSourceKey) { nextKey in
             guard let nextKey, nextKey != source.key, let next = sources.first(where: { $0.key == nextKey }) else { return }
             if !visited.contains(next) { visited.insert(next) }
@@ -378,6 +425,13 @@ struct HomeView: View {
 
     // MARK: Header (search + filter, source bar)
 
+    private var channelButtonLabel: String {
+        let total = HomeSource.allManageable.count
+        let hidden = HomeSource.allManageable.count - sources.count
+        if total > 7 || hidden > 0 { return "频道 · \(total)" }
+        return "频道"
+    }
+
     private var header: some View {
         VStack(spacing: 0) {
             if layout.useRail {
@@ -386,7 +440,7 @@ struct HomeView: View {
                     Button { showChannels = true } label: {
                         HStack(spacing: 5) {
                             Image(systemName: "line.3.horizontal.decrease").font(.system(size: 13, weight: .semibold))
-                            Text("筛选").font(.system(size: 14, weight: .medium))
+                            Text(channelButtonLabel).font(.system(size: 14, weight: .medium))
                         }
                         .foregroundStyle(STVTheme.text)
                         .padding(.horizontal, 14).frame(height: 38).contentShape(Capsule())
@@ -408,7 +462,7 @@ struct HomeView: View {
                         Button { showChannels = true } label: {
                             HStack(spacing: 5) {
                                 Image(systemName: "line.3.horizontal.decrease").font(.system(size: 14, weight: .semibold))
-                                Text("筛选").font(.system(size: 14, weight: .medium))
+                                Text(channelButtonLabel).font(.system(size: 14, weight: .medium))
                             }
                             .foregroundStyle(STVTheme.text)
                             .padding(.horizontal, 16).frame(height: 46).contentShape(Capsule())
@@ -429,91 +483,351 @@ struct HomeView: View {
     }
 
     private var channelPanel: some View {
-        DSSheet("频道", subtitle: reorderingSources ? "调整首页顶部来源顺序" : "选择来源、排序与榜单") {
+        let allItems = HomeSource.allManageable
+        let visibleItems = sources
+        let hiddenItems = allItems.filter { gate.isHiddenOnHome($0.key) }
+        let importedItems = allItems.filter(\.isImported)
+        let q = channelQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        func matches(_ item: HomeSource) -> Bool {
+            if !q.isEmpty && !item.label.localizedCaseInsensitiveContains(q) && !item.categoryTag.localizedCaseInsensitiveContains(q) {
+                return false
+            }
+            switch channelFilter {
+            case "首页显示": return !gate.isHiddenOnHome(item.key)
+            case "已收起": return gate.isHiddenOnHome(item.key)
+            case "内置": return item.categoryTag == "内置" || item.categoryTag == "功能"
+            case "采集站": return item.categoryTag == "采集站"
+            case "插件": return item.categoryTag == "插件"
+            default: return true
+            }
+        }
+
+        let filteredVisible = visibleItems.filter(matches)
+        let filteredHidden = hiddenItems.filter(matches)
+        let cmsCount = allItems.filter { $0.categoryTag == "采集站" }.count
+        let pluginCount = allItems.filter { $0.categoryTag == "插件" }.count
+        let filterTabs: [(String, Int)] = {
+            var list: [(String, Int)] = [("全部", allItems.count), ("首页显示", visibleItems.count)]
+            if !hiddenItems.isEmpty { list.append(("已收起", hiddenItems.count)) }
+            if cmsCount > 0 || pluginCount > 0 {
+                list.append(("内置", allItems.filter { $0.categoryTag == "内置" || $0.categoryTag == "功能" }.count))
+                if cmsCount > 0 { list.append(("采集站", cmsCount)) }
+                if pluginCount > 0 { list.append(("插件", pluginCount)) }
+            }
+            return list
+        }()
+        let multiSubBuiltins = visibleItems.filter { $0.subs.count > 1 && matches($0) }
+
+        return DSSheet("频道管理", subtitle: "首页显示 \(visibleItems.count) 个 · 已收起 \(hiddenItems.count) 个（搜索均可用）") {
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack(spacing: 12) {
-                            Text("首页来源").dsFont(13, .semibold, relativeTo: .footnote).foregroundStyle(STVTheme.secondary)
-                            Spacer(minLength: 0)
-                            if reorderingSources && !gate.homeOrder.isEmpty {
-                                Button {
-                                    DS.tick()
-                                    withAnimation(DS.select) {
-                                        gate.resetHomeOrder()
-                                        refreshSources()
-                                    }
-                                } label: {
-                                    Text("恢复默认").dsFont(13, .medium, relativeTo: .footnote).foregroundStyle(STVTheme.secondary)
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityIdentifier("home.order.reset")
+                VStack(alignment: .leading, spacing: 16) {
+                    // Mode switcher: 快速直达 | 管理与排序
+                    SegmentedTabs(
+                        items: [false, true],
+                        selection: $reorderingSources,
+                        label: { $0 ? "管理与排序" : "快速直达" }
+                    )
+                    .accessibilityIdentifier("home.order.toggle")
+
+                    // Live search box across all sources
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(STVTheme.secondary)
+                        TextField("搜索频道或片源名称…", text: $channelQuery)
+                            .font(.system(size: 14.5))
+                            .textInputAutocapitalization(.never)
+                            .disableAutocorrection(true)
+                        if !channelQuery.isEmpty {
+                            Button { channelQuery = "" } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 15))
+                                    .foregroundStyle(STVTheme.secondary)
                             }
-                            if sources.count > 1 {
-                                Button {
-                                    DS.tick()
-                                    withAnimation(DS.select) { reorderingSources.toggle() }
-                                } label: {
-                                    Text(reorderingSources ? "完成" : "排序")
-                                        .dsFont(13, .semibold, relativeTo: .footnote)
-                                        .foregroundStyle(STVTheme.accent)
-                                        .padding(.horizontal, 12).padding(.vertical, 5)
-                                        .background(STVTheme.accentSoft, in: Capsule())
-                                }
-                                .buttonStyle(PressScale())
-                                .accessibilityIdentifier("home.order.toggle")
-                            }
+                            .buttonStyle(.plain)
                         }
-                        if reorderingSources {
-                            HomeSourceOrderRows(sources: sources) { updated in
-                                sources = updated
-                                gate.setHomeOrder(updated.map(\.key))
-                            }
-                        } else {
-                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 88), spacing: 10)], spacing: 10) {
-                                ForEach(sources) { s in
-                                    let on = s == source
+                    }
+                    .padding(.horizontal, 13)
+                    .frame(height: 40)
+                    .background(STVTheme.glass, in: Capsule())
+
+                    // Category filter chips
+                    if filterTabs.count > 2 {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(filterTabs, id: \.0) { tab, count in
+                                    let on = channelFilter == tab
                                     Button {
                                         DS.tick()
-                                        source = s
-                                        showChannels = false
+                                        withAnimation(DS.select) { channelFilter = tab }
                                     } label: {
-                                        Text(s.label).dsFont(14, on ? .semibold : .regular, relativeTo: .subheadline)
-                                            .foregroundStyle(on ? STVTheme.accent : STVTheme.text)
-                                            .lineLimit(1).minimumScaleFactor(0.8)
-                                            .frame(maxWidth: .infinity, minHeight: 42)
-                                            .background(on ? STVTheme.accentSoft : STVTheme.glass,
-                                                        in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                                            .contentShape(RoundedRectangle(cornerRadius: 14))
+                                        Text("\(tab) \(count)")
+                                            .dsFont(12.5, on ? .bold : .medium, relativeTo: .caption)
+                                            .foregroundStyle(on ? STVTheme.bg : STVTheme.secondary)
+                                            .padding(.horizontal, 12).frame(height: 30)
+                                            .background(on ? STVTheme.text : STVTheme.glass, in: Capsule())
                                     }
-                                    .buttonStyle(PressScale()).accessibilityAddTraits(on ? .isSelected : [])
-                                    .accessibilityIdentifier("panel.source.\(s.label)")
+                                    .buttonStyle(PressScale())
                                 }
                             }
                         }
                     }
 
-                    if !reorderingSources {
-                        ForEach(sources.filter { !$0.subs.isEmpty }) { s in
+                    if reorderingSources {
+                        // One-tap batch cleanup bar for heavy source importers
+                        if !importedItems.isEmpty || !gate.homeOrder.isEmpty || !hiddenItems.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("一键整理首页顶栏").dsFont(13, .semibold, relativeTo: .footnote).foregroundStyle(STVTheme.secondary)
+                                HStack(spacing: 8) {
+                                    if !importedItems.isEmpty {
+                                        let allImportedHidden = importedItems.allSatisfy { gate.isHiddenOnHome($0.key) }
+                                        Button {
+                                            DS.tick()
+                                            withAnimation(DS.select) {
+                                                gate.setHomeHiddenBatch(importedItems.map(\.key), hidden: !allImportedHidden)
+                                                refreshSources()
+                                            }
+                                        } label: {
+                                            Text(allImportedHidden ? "展开导入源" : "仅保留内置")
+                                                .dsFont(13, .semibold, relativeTo: .footnote)
+                                                .foregroundStyle(STVTheme.accent)
+                                                .frame(maxWidth: .infinity, minHeight: 38)
+                                                .background(STVTheme.accentSoft, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                        }
+                                        .buttonStyle(PressScale())
+                                    }
+                                    if !hiddenItems.isEmpty {
+                                        Button {
+                                            DS.tick()
+                                            withAnimation(DS.select) {
+                                                gate.clearHomeHidden()
+                                                refreshSources()
+                                            }
+                                        } label: {
+                                            Text("全部显示")
+                                                .dsFont(13, .medium, relativeTo: .footnote)
+                                                .foregroundStyle(STVTheme.text)
+                                                .frame(maxWidth: .infinity, minHeight: 38)
+                                                .background(STVTheme.glass, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                        }
+                                        .buttonStyle(PressScale())
+                                    }
+                                    if !gate.homeOrder.isEmpty {
+                                        Button {
+                                            DS.tick()
+                                            withAnimation(DS.select) {
+                                                gate.resetHomeOrder()
+                                                refreshSources()
+                                            }
+                                        } label: {
+                                            Text("默认顺序")
+                                                .dsFont(13, .medium, relativeTo: .footnote)
+                                                .foregroundStyle(STVTheme.secondary)
+                                                .frame(maxWidth: .infinity, minHeight: 38)
+                                                .background(STVTheme.glass, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                        }
+                                        .buttonStyle(PressScale())
+                                        .accessibilityIdentifier("home.order.reset")
+                                    }
+                                }
+                                Text("收起的片源仅从首页顶栏隐藏，全局搜索仍完全可用。")
+                                    .dsFont(11.5, relativeTo: .caption).foregroundStyle(STVTheme.tertiary)
+                            }
+                        }
+
+                        // Home feature switches
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("功能频道开关").dsFont(13, .semibold, relativeTo: .footnote).foregroundStyle(STVTheme.secondary)
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 78), spacing: 8)], spacing: 8) {
+                                homeFeatureChip("频道", on: gate.showChannelsTab) { gate.setShowChannelsTab(!gate.showChannelsTab) }
+                                homeFeatureChip("漫画", on: gate.showMangaTab) { gate.setShowMangaTab(!gate.showMangaTab) }
+                                homeFeatureChip("小说", on: gate.showNovelTab) { gate.setShowNovelTab(!gate.showNovelTab) }
+                                homeFeatureChip("底部音乐", on: gate.showMusicTab) { gate.setShowMusicTab(!gate.showMusicTab) }
+                            }
+                        }
+
+                        // Visible sources (press-and-drag reorder + pin + fold off Home)
+                        if !filteredVisible.isEmpty {
                             VStack(alignment: .leading, spacing: 10) {
-                                Text(s.label + " · 板块").dsFont(13, .semibold, relativeTo: .footnote).foregroundStyle(STVTheme.secondary)
-                                LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 10)], spacing: 10) {
-                                    ForEach(s.subs, id: \.self) { t in
-                                        let on = s == source && (subs[s] ?? s.subs[0]) == t
-                                        Button { subs[s] = t; source = s; showChannels = false } label: {
-                                            Text(t.subLabel).dsFont(14, on ? .semibold : .regular, relativeTo: .subheadline)
+                                HStack {
+                                    Text("首页已显示（\(filteredVisible.count)）").dsFont(13, .semibold, relativeTo: .footnote).foregroundStyle(STVTheme.secondary)
+                                    Spacer()
+                                    Text("长按或拖 ≡ 排序").dsFont(11.5, relativeTo: .caption).foregroundStyle(STVTheme.tertiary)
+                                }
+                                HomeSourceOrderRows(
+                                    sources: filteredVisible,
+                                    onChange: { updatedSubset in
+                                        if q.isEmpty && (channelFilter == "全部" || channelFilter == "首页显示") {
+                                            sources = updatedSubset
+                                            gate.setHomeOrder(updatedSubset.map(\.key))
+                                        } else {
+                                            // Apply relative reorder within the full visible list
+                                            let subsetKeys = Set(updatedSubset.map(\.key))
+                                            var iter = updatedSubset.makeIterator()
+                                            let merged = visibleItems.map { subsetKeys.contains($0.key) ? (iter.next() ?? $0) : $0 }
+                                            sources = merged
+                                            gate.setHomeOrder(merged.map(\.key))
+                                        }
+                                    },
+                                    onPinToTop: { item in
+                                        var copy = visibleItems
+                                        copy.removeAll { $0.key == item.key }
+                                        copy.insert(item, at: 0)
+                                        sources = copy
+                                        gate.setHomeOrder(copy.map(\.key))
+                                    },
+                                    onHideFromHome: { item in
+                                        DS.tick()
+                                        withAnimation(DS.select) {
+                                            gate.setHomeHidden(item.key, hidden: true)
+                                            refreshSources()
+                                        }
+                                    }
+                                )
+                            }
+                        }
+
+                        // Hidden / folded sources (1-tap restore to Home)
+                        if !filteredHidden.isEmpty {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("已从首页收起（\(filteredHidden.count) · 搜索仍可用）")
+                                    .dsFont(13, .semibold, relativeTo: .footnote).foregroundStyle(STVTheme.secondary)
+                                VStack(spacing: 0) {
+                                    ForEach(Array(filteredHidden.enumerated()), id: \.element.id) { idx, item in
+                                        HStack(spacing: 10) {
+                                            Text(item.label)
+                                                .dsFont(15, .medium, relativeTo: .body)
+                                                .foregroundStyle(STVTheme.secondary)
+                                                .lineLimit(1)
+                                            DSTag(text: item.categoryTag)
+                                            Spacer(minLength: 0)
+                                            Button {
+                                                DS.tick()
+                                                withAnimation(DS.select) {
+                                                    gate.setHomeHidden(item.key, hidden: false)
+                                                    refreshSources()
+                                                }
+                                            } label: {
+                                                HStack(spacing: 4) {
+                                                    Image(systemName: "plus").font(.system(size: 11, weight: .bold))
+                                                    Text("放回首页").dsFont(12.5, .semibold, relativeTo: .caption)
+                                                }
+                                                .foregroundStyle(STVTheme.accent)
+                                                .padding(.horizontal, 10).frame(height: 30)
+                                                .background(STVTheme.accentSoft, in: Capsule())
+                                            }
+                                            .buttonStyle(PressScale())
+                                        }
+                                        .padding(.horizontal, 14).frame(minHeight: 46)
+                                        if idx < filteredHidden.count - 1 { Hairline().padding(.leading, 14) }
+                                    }
+                                }
+                                .background(STVTheme.glass, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            }
+                        }
+                    } else {
+                        // Mode 1: 快速直达
+                        if !filteredVisible.isEmpty {
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack {
+                                    Text("首页频道（\(filteredVisible.count)）").dsFont(13, .semibold, relativeTo: .footnote).foregroundStyle(STVTheme.secondary)
+                                    Spacer()
+                                    if !importedItems.isEmpty {
+                                        Button {
+                                            DS.tick()
+                                            withAnimation(DS.select) { reorderingSources = true }
+                                        } label: {
+                                            Text("管理 / 收起 ›").dsFont(12.5, .medium, relativeTo: .caption).foregroundStyle(STVTheme.accent)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                                LazyVGrid(columns: [GridItem(.adaptive(minimum: 88), spacing: 10)], spacing: 10) {
+                                    ForEach(filteredVisible) { s in
+                                        let on = s == source
+                                        Button {
+                                            DS.tick()
+                                            source = s
+                                            showChannels = false
+                                        } label: {
+                                            Text(s.label).dsFont(14, on ? .semibold : .regular, relativeTo: .subheadline)
                                                 .foregroundStyle(on ? STVTheme.accent : STVTheme.text)
                                                 .lineLimit(1).minimumScaleFactor(0.8)
-                                                .frame(maxWidth: .infinity, minHeight: 44)
+                                                .frame(maxWidth: .infinity, minHeight: 42)
+                                                .padding(.horizontal, 6)
                                                 .background(on ? STVTheme.accentSoft : STVTheme.glass,
                                                             in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                                                 .contentShape(RoundedRectangle(cornerRadius: 14))
                                         }
                                         .buttonStyle(PressScale()).accessibilityAddTraits(on ? .isSelected : [])
-                                        .accessibilityIdentifier("panel.\(s.label).\(t.subLabel)")
+                                        .accessibilityIdentifier("panel.source.\(s.label)")
                                     }
                                 }
                             }
+                        }
+
+                        // Built-in multi-sub sections ONLY (never duplicate single-page CMS/plugins!)
+                        if q.isEmpty && (channelFilter == "全部" || channelFilter == "内置" || channelFilter == "首页显示") {
+                            ForEach(multiSubBuiltins) { s in
+                                VStack(alignment: .leading, spacing: 10) {
+                                    Text(s.label + " · 板块").dsFont(13, .semibold, relativeTo: .footnote).foregroundStyle(STVTheme.secondary)
+                                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 10)], spacing: 10) {
+                                        ForEach(s.subs, id: \.self) { t in
+                                            let on = s == source && (subs[s] ?? s.subs[0]) == t
+                                            Button { subs[s] = t; source = s; showChannels = false } label: {
+                                                Text(t.subLabel).dsFont(14, on ? .semibold : .regular, relativeTo: .subheadline)
+                                                    .foregroundStyle(on ? STVTheme.accent : STVTheme.text)
+                                                    .lineLimit(1).minimumScaleFactor(0.8)
+                                                    .frame(maxWidth: .infinity, minHeight: 42)
+                                                    .background(on ? STVTheme.accentSoft : STVTheme.glass,
+                                                                in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                                    .contentShape(RoundedRectangle(cornerRadius: 14))
+                                            }
+                                            .buttonStyle(PressScale()).accessibilityAddTraits(on ? .isSelected : [])
+                                            .accessibilityIdentifier("panel.\(s.label).\(t.subLabel)")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Folded sources (still 1-tap reachable!)
+                        if !filteredHidden.isEmpty {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("已收起的片源（\(filteredHidden.count) · 点按放回并打开）")
+                                    .dsFont(13, .semibold, relativeTo: .footnote).foregroundStyle(STVTheme.secondary)
+                                LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 10)], spacing: 10) {
+                                    ForEach(filteredHidden) { s in
+                                        Button {
+                                            DS.tick()
+                                            gate.setHomeHidden(s.key, hidden: false)
+                                            refreshSources()
+                                            source = s
+                                            showChannels = false
+                                        } label: {
+                                            HStack(spacing: 4) {
+                                                Text(s.label).dsFont(13.5, .medium, relativeTo: .subheadline)
+                                                    .foregroundStyle(STVTheme.secondary)
+                                                    .lineLimit(1).minimumScaleFactor(0.8)
+                                            }
+                                            .frame(maxWidth: .infinity, minHeight: 40)
+                                            .padding(.horizontal, 6)
+                                            .background(STVTheme.glass.opacity(0.65), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(STVTheme.hairline, style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+                                        }
+                                        .buttonStyle(PressScale())
+                                    }
+                                }
+                            }
+                        }
+
+                        if filteredVisible.isEmpty && filteredHidden.isEmpty {
+                            Text("没有匹配的频道或片源")
+                                .dsFont(14, relativeTo: .subheadline)
+                                .foregroundStyle(STVTheme.tertiary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 28)
                         }
                     }
                 }
@@ -524,61 +838,181 @@ struct HomeView: View {
         .accessibilityIdentifier("home.channelPanel")
         .dsSheetChrome([.medium, .large])
     }
+
+    private func homeFeatureChip(_ label: String, on: Bool, action: @escaping () -> Void) -> some View {
+        Button {
+            DS.tick()
+            withAnimation(DS.select) {
+                action()
+                refreshSources()
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: on ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 13, weight: .semibold))
+                Text(label).dsFont(13.5, on ? .semibold : .regular, relativeTo: .subheadline)
+            }
+            .foregroundStyle(on ? STVTheme.accent : STVTheme.secondary)
+            .frame(maxWidth: .infinity, minHeight: 40)
+            .background(on ? STVTheme.accentSoft : STVTheme.glass, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(PressScale())
+    }
 }
 
-/// Shared inline reorder list for Home sources (supports 置顶 / 上移 / 下移, used in both Home sheet & 片源管理).
+/// Shared inline press-and-drag reorder list for Home sources (supports 长按拖动 / 左侧 ≡ 即时拖动 / 置顶 / 从首页收起).
 struct HomeSourceOrderRows: View {
     let sources: [HomeSource]
     let onChange: ([HomeSource]) -> Void
+    var onPinToTop: ((HomeSource) -> Void)? = nil
+    var onHideFromHome: ((HomeSource) -> Void)? = nil
+
+    @State private var draggingKey: String? = nil
+    @State private var dragAnchorY: CGFloat = 0
+    @State private var dragAnchorSet = false
+    @State private var dragOffsetY: CGFloat = 0
+    private let rowHeight: CGFloat = 50
 
     var body: some View {
         VStack(spacing: 0) {
-            ForEach(Array(sources.enumerated()), id: \.element.id) { idx, item in
-                HStack(spacing: 12) {
+            ForEach(sources, id: \.id) { item in
+                let idx = sources.firstIndex(where: { $0.id == item.id }) ?? 0
+                let isDragging = draggingKey == item.key
+                HStack(spacing: 8) {
+                    // Instant drag handle (touch-and-drag immediately without ScrollView contention)
+                    Image(systemName: "line.3.horizontal")
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .foregroundStyle(isDragging ? STVTheme.accent : STVTheme.tertiary)
+                        .frame(width: 28, height: rowHeight)
+                        .contentShape(Rectangle())
+                        .highPriorityGesture(
+                            DragGesture(minimumDistance: 2, coordinateSpace: .named("homeOrderList"))
+                                .onChanged { v in handleDragChanged(item: item, locationY: v.location.y) }
+                                .onEnded { _ in finishDrag() }
+                        )
                     Text("\(idx + 1)")
                         .dsFont(12, .bold, relativeTo: .caption)
                         .foregroundStyle(idx == 0 ? STVTheme.accent : STVTheme.tertiary)
-                        .frame(width: 22, alignment: .center)
+                        .frame(width: 20, alignment: .center)
                     Text(item.label)
-                        .dsFont(15, .medium, relativeTo: .body)
+                        .dsFont(15, isDragging ? .semibold : .medium, relativeTo: .body)
                         .foregroundStyle(STVTheme.text)
                         .lineLimit(1)
                     if case .site(let s) = item {
                         DSTag(text: s.pluginID != nil ? "插件" : (s.cmsKey != nil ? "采集站" : "内置"))
                     }
                     Spacer(minLength: 0)
-                    Button { moveTop(idx) } label: {
+                    Button { moveTop(item) } label: {
                         Image(systemName: "arrow.up.to.line")
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundStyle(idx > 0 ? STVTheme.secondary : STVTheme.tertiary.opacity(0.35))
-                            .frame(width: 34, height: 34).contentShape(Rectangle())
+                            .frame(width: 32, height: 36).contentShape(Rectangle())
                     }
-                    .buttonStyle(PressScale()).disabled(idx == 0).accessibilityLabel("置顶 \(item.label)")
-                    Button { move(idx, by: -1) } label: {
-                        Image(systemName: "chevron.up")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(idx > 0 ? STVTheme.text : STVTheme.tertiary.opacity(0.35))
-                            .frame(width: 34, height: 34).contentShape(Rectangle())
+                    .buttonStyle(PressScale()).disabled(idx == 0 && onPinToTop == nil).accessibilityLabel("置顶 \(item.label)")
+                    if let onHide = onHideFromHome, item.canHideFromHome {
+                        Button { onHide(item) } label: {
+                            Image(systemName: "eye.slash")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(STVTheme.secondary)
+                                .frame(width: 32, height: 36).contentShape(Rectangle())
+                        }
+                        .buttonStyle(PressScale()).accessibilityLabel("从首页收起 \(item.label)")
                     }
-                    .buttonStyle(PressScale()).disabled(idx == 0).accessibilityLabel("上移 \(item.label)")
-                    Button { move(idx, by: 1) } label: {
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(idx < sources.count - 1 ? STVTheme.text : STVTheme.tertiary.opacity(0.35))
-                            .frame(width: 34, height: 34).contentShape(Rectangle())
-                    }
-                    .buttonStyle(PressScale()).disabled(idx >= sources.count - 1).accessibilityLabel("下移 \(item.label)")
                 }
-                .padding(.horizontal, 14)
-                .frame(minHeight: 48)
-                if idx < sources.count - 1 { Hairline().padding(.leading, 48) }
+                .padding(.horizontal, 10)
+                .frame(height: rowHeight)
+                .background(
+                    RoundedRectangle(cornerRadius: isDragging ? 14 : 0, style: .continuous)
+                        .fill(isDragging ? STVTheme.card : Color.clear)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(isDragging ? STVTheme.accent.opacity(0.75) : Color.clear, lineWidth: 1.2)
+                )
+                .overlay(alignment: .bottom) {
+                    if !isDragging && idx < sources.count - 1 { Hairline().padding(.leading, 46) }
+                }
+                .shadow(color: isDragging ? Color.black.opacity(0.24) : .clear, radius: 10, y: 4)
+                .scaleEffect(isDragging ? 1.02 : 1.0)
+                .offset(y: isDragging ? dragOffsetY : 0)
+                .zIndex(isDragging ? 10 : 0)
+                .contentShape(Rectangle())
+                // Press-and-hold anywhere on the row to lift and drag smoothly
+                .simultaneousGesture(
+                    LongPressGesture(minimumDuration: 0.22)
+                        .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("homeOrderList")))
+                        .onChanged { phase in
+                            switch phase {
+                            case .second(true, nil):
+                                if draggingKey != item.key {
+                                    draggingKey = item.key
+                                    dragAnchorSet = false
+                                    dragOffsetY = 0
+                                    DS.tick()
+                                }
+                            case .second(true, let drag?):
+                                handleDragChanged(item: item, locationY: drag.location.y)
+                            default:
+                                break
+                            }
+                        }
+                        .onEnded { _ in finishDrag() }
+                )
+                .accessibilityAction(named: "上移") { move(item, by: -1) }
+                .accessibilityAction(named: "下移") { move(item, by: 1) }
             }
         }
+        .coordinateSpace(name: "homeOrderList")
         .background(STVTheme.glass, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
-    private func moveTop(_ idx: Int) {
-        guard idx > 0, sources.indices.contains(idx) else { return }
+    private func handleDragChanged(item: HomeSource, locationY: CGFloat) {
+        if draggingKey != item.key || !dragAnchorSet {
+            draggingKey = item.key
+            dragAnchorY = locationY
+            dragAnchorSet = true
+            dragOffsetY = 0
+            DS.tick()
+            return
+        }
+        var dy = locationY - dragAnchorY
+        guard let curIdx = sources.firstIndex(where: { $0.id == item.id }) else { return }
+        if dy > rowHeight * 0.52, curIdx + 1 < sources.count {
+            var copy = sources
+            copy.swapAt(curIdx, curIdx + 1)
+            dragAnchorY += rowHeight
+            dy -= rowHeight
+            dragOffsetY = dy
+            DS.tick()
+            withAnimation(DS.select) { onChange(copy) }
+        } else if dy < -rowHeight * 0.52, curIdx - 1 >= 0 {
+            var copy = sources
+            copy.swapAt(curIdx, curIdx - 1)
+            dragAnchorY -= rowHeight
+            dy += rowHeight
+            dragOffsetY = dy
+            DS.tick()
+            withAnimation(DS.select) { onChange(copy) }
+        } else {
+            dragOffsetY = dy
+        }
+    }
+
+    private func finishDrag() {
+        withAnimation(DS.select) {
+            draggingKey = nil
+            dragAnchorSet = false
+            dragOffsetY = 0
+        }
+    }
+
+    private func moveTop(_ item: HomeSource) {
+        if let onPin = onPinToTop {
+            DS.tick()
+            withAnimation(DS.select) { onPin(item) }
+            return
+        }
+        guard let idx = sources.firstIndex(where: { $0.id == item.id }), idx > 0 else { return }
         DS.tick()
         var copy = sources
         let picked = copy.remove(at: idx)
@@ -586,9 +1020,10 @@ struct HomeSourceOrderRows: View {
         withAnimation(DS.select) { onChange(copy) }
     }
 
-    private func move(_ idx: Int, by delta: Int) {
+    private func move(_ item: HomeSource, by delta: Int) {
+        guard let idx = sources.firstIndex(where: { $0.id == item.id }) else { return }
         let target = idx + delta
-        guard sources.indices.contains(idx), sources.indices.contains(target) else { return }
+        guard sources.indices.contains(target) else { return }
         DS.tick()
         var copy = sources
         copy.swapAt(idx, target)
@@ -1052,6 +1487,10 @@ private struct PosterHero: View {
         .background { backdrop }
         .overlay(alignment: .bottomTrailing) { dots }
         .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: corner, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.22), style: StrokeStyle(lineWidth: 1.15, lineCap: .round, dash: [7, 5]))
+        )
         // Shadow of a plain shape behind the card: radius stays inside horizontal pagePadding so the pager never clips it.
         .background { RoundedRectangle(cornerRadius: corner, style: .continuous).fill(Color.black.shadow(.drop(color: .black.opacity(isTablet ? 0.20 : 0.22), radius: isTablet ? 14 : 15, y: isTablet ? 8 : 14))).padding(1) }
         // Auto-advance; the timer restarts on every page change, so a manual swipe gets a full 6 s.
@@ -1117,10 +1556,13 @@ private struct PosterHero: View {
 
         return HStack(alignment: .center, spacing: expanded ? 28 : 20) {
             VStack(alignment: .leading, spacing: 0) {
-                Text(kicker(rank))
-                    .font(.system(size: 12, weight: .heavy)).tracking(0.6)
-                    .foregroundStyle(Color(red: 0.949, green: 0.710, blue: 0.361))
-                    .lineLimit(1)
+                HStack(spacing: 5) {
+                    YMDoodleSparkle().fill(YMTheme.lime).frame(width: 10, height: 10)
+                    Text(kicker(rank))
+                        .font(.system(size: 12, weight: .heavy)).tracking(0.6)
+                        .foregroundStyle(YMTheme.lime)
+                        .lineLimit(1)
+                }
                 Text(s.title)
                     .font(.system(size: expanded ? 28 : 23, weight: .bold))
                     .foregroundStyle(.white)
@@ -1159,8 +1601,8 @@ private struct PosterHero: View {
                             if let p = prog, p.fraction > 0.01 {
                                 GeometryReader { g in
                                     ZStack(alignment: .leading) {
-                                        Color(red: 0.157, green: 0.427, blue: 0.937).opacity(0.18)
-                                        Color(red: 0.157, green: 0.427, blue: 0.937)
+                                        YMTheme.lime.opacity(0.22)
+                                        YMTheme.lime
                                             .frame(width: g.size.width * CGFloat(min(max(p.fraction, 0.06), 1)))
                                     }
                                 }
@@ -1200,6 +1642,7 @@ private struct PosterHero: View {
             NavigationLink(value: Route.series(s)) {
                 CoverView(url: s.cover, corner: 16, maxPixelSize: landscape ? CoverPixels.wide : CoverPixels.poster)
                     .frame(width: posterW, height: posterH)
+                    .overlay(YMWobblyFrame(seed: UInt64(abs(s.id.hashValue) % 97 + 11), inset: -2).stroke(Color.white.opacity(0.45), lineWidth: 1.35))
                     .shadow(color: .black.opacity(0.42), radius: 18, y: 10)
                     .zoomSource(s.id, ns)
                     .accessibilityIdentifier("home.hero.cover")
@@ -1244,6 +1687,7 @@ private struct PosterHero: View {
                                        startPoint: .top, endPoint: .bottom)
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }
+                    .overlay(YMWobblyFrame(seed: UInt64(abs(s.id.hashValue) % 97 + 5), inset: -1.5).stroke(Color.white.opacity(0.42), lineWidth: 1.25))
                     .overlay(alignment: .bottomTrailing) {
                         if let e = DS.episodes(s) {
                             Text(e).font(.system(size: 11)).foregroundStyle(.white.opacity(0.9)).padding(.trailing, 8).padding(.bottom, 7)
@@ -1259,8 +1703,11 @@ private struct PosterHero: View {
 
     private func info(_ s: HGSeries, rank: Int) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(kicker(rank)).font(.system(size: 11, weight: .heavy)).tracking(0.6)
-                .foregroundStyle(Color(red: 0.949, green: 0.710, blue: 0.361)).lineLimit(1)
+            HStack(spacing: 4) {
+                YMDoodleSparkle().fill(YMTheme.lime).frame(width: 9, height: 9)
+                Text(kicker(rank)).font(.system(size: 11, weight: .heavy)).tracking(0.6)
+                    .foregroundStyle(YMTheme.lime).lineLimit(1)
+            }
             Text(s.title).font(.system(size: 20, weight: .bold)).foregroundStyle(.white).lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 6)
@@ -1287,7 +1734,7 @@ private struct PosterHero: View {
     private var dots: some View {
         HStack(spacing: 4) {
             ForEach(picks.indices, id: \.self) { i in
-                Capsule().fill(i == index ? Color.white : Color.white.opacity(0.4)).frame(width: i == index ? 14 : 5, height: 5)
+                Capsule().fill(i == index ? YMTheme.lime : Color.white.opacity(0.38)).frame(width: i == index ? 16 : 5, height: 5)
             }
         }
         .animation(DS.select, value: index)

@@ -86,6 +86,13 @@ enum Route: Hashable {
     case downloads
     case tdlib
     case mangaHome
+    case musicHome
+    case musicSettings
+    case musicArtist(MusicArtistRef)
+    case musicAlbum(MusicAlbumRef)
+    case musicChart(MusicChart)
+    case musicPlaylist(MusicPlaylist)
+    case musicDailyRec([MusicTrack])
     case manga(MangaItem)
     case mangaLibrary
     case tdChat(Int64, String)
@@ -129,6 +136,25 @@ extension View {
             case .downloads: DownloadsView()
             case .tdlib: TDLibSettingsView()
             case .mangaHome: MangaHomeView()
+            case .musicHome: MusicHomeView(isRootTab: false)
+            case .musicSettings: MusicSettingsView()
+            case .musicArtist(let ref): MusicArtistDetailView(ref: ref)
+            case .musicAlbum(let ref): MusicAlbumDetailView(ref: ref)
+            case .musicChart(let c):
+                MusicTrackListView(title: c.name, subtitle: c.updatedLabel, sourceLabel: c.source.label, tracks: c.tracks, canClone: true)
+            case .musicPlaylist(let p):
+                MusicTrackListView(
+                    title: p.name,
+                    subtitle: p.subtitle,
+                    sourceLabel: p.source?.label ?? "本地歌单",
+                    tracks: p.tracks,
+                    canClone: p.isCloud,
+                    remoteSource: p.source,
+                    remotePlaylistId: p.remoteId,
+                    playlistId: p.id
+                )
+            case .musicDailyRec(let list):
+                MusicDailyRecView(initialTracks: list)
             case .manga(let m): MangaDetailView(item: m)
             case .mangaLibrary: MangaLibraryView()
             case .tdChat(let id, let t): TDChatView(chatId: id, title: t)

@@ -12,6 +12,14 @@ final class HongguoWebAccount: ObservableObject {
         let avatarUrl: String
     }
 
+    enum QRPollResult: Equatable {
+        case waiting
+        case scanned
+        case confirmed(redirectURL: String?)
+        case expired
+        case failed
+    }
+
     static let shared = HongguoWebAccount()
     static let webOrigin = "https://hongguoduanju.com"
     static let pcUserAgent =
@@ -94,6 +102,20 @@ final class HongguoWebAccount: ObservableObject {
             Task { @MainActor [weak owner] in
                 owner?.markApiWebViewReady(false)
             }
+        }
+
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            Task { @MainActor [weak owner] in
+                owner?.handleApiWebViewTerminated(webView)
+            }
+        }
+    }
+
+    private func handleApiWebViewTerminated(_ webView: WKWebView) {
+        if apiWebView === webView {
+            apiWebView = nil
+            apiWebViewReady = false
+            markApiWebViewReady(false)
         }
     }
 
@@ -244,6 +266,207 @@ final class HongguoWebAccount: ObservableObject {
         cachedCookieHeader = header
         UserDefaults.standard.set(header, forKey: Self.cookieKey)
         return header
+    }
+
+    /// Writes natively captured `Set-Cookie` cookies into WebKit's persistent store and refreshes the cached header.
+    func installCookies(_ cookies: [HTTPCookie]) async {
+        guard !cookies.isEmpty else { return }
+        let store = WKWebsiteDataStore.default().httpCookieStore
+        for cookie in cookies {
+            await store.setCookie(cookie)
+        }
+        _ = await syncCookiesFromWebView()
+    }
+
+    /// Builds a direct `/passport/web/check_qrconnect/` URL from either a captured URL or QR token.
+    nonisolated static func buildCheckQRURL(checkURL: String?, token: String?) -> URL? {
+        if let raw = checkURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !raw.isEmpty,
+           let u = URL(string: raw),
+           u.host?.lowercased().contains("hongguoduanju.com") == true {
+            return u
+        }
+        guard let tok = token?.trimmingCharacters(in: .whitespacesAndNewlines), !tok.isEmpty else { return nil }
+        var comps = URLComponents(string: "\(webOrigin)/passport/web/check_qrconnect/")
+        comps?.queryItems = [
+            URLQueryItem(name: "next", value: "\(webOrigin)/"),
+            URLQueryItem(name: "token", value: tok),
+            URLQueryItem(name: "passport_jssdk_version", value: "2.4.13"),
+            URLQueryItem(name: "passport_jssdk_type", value: "normal"),
+            URLQueryItem(name: "is_from_ttaccountsdk", value: "1"),
+            URLQueryItem(name: "aid", value: "513755"),
+            URLQueryItem(name: "language", value: "zh"),
+            URLQueryItem(name: "account_sdk_source", value: "web")
+        ]
+        return comps?.url
+    }
+
+    /// Parses ByteDance passport `check_qrconnect` JSON into a normalized poll result.
+    nonisolated static func parseQRConnectResponse(_ data: Data) -> QRPollResult {
+        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let d = root["data"] as? [String: Any] else {
+            return .failed
+        }
+        let rawStatus: String
+        if let s = d["status"] as? String {
+            rawStatus = s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        } else if let n = d["status"] as? Int {
+            rawStatus = String(n)
+        } else {
+            rawStatus = ""
+        }
+        let redirect = (d["redirect_url"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch rawStatus {
+        case "confirmed", "3":
+            return .confirmed(redirectURL: (redirect?.isEmpty == false) ? redirect : nil)
+        case "scanned", "2":
+            return .scanned
+        case "expired", "5", "refuse", "refused", "cancel", "cancelled", "4":
+            return .expired
+        case "new", "1":
+            return .waiting
+        default:
+            let errCode = d["error_code"] as? Int ?? 0
+            if errCode != 0 { return .expired }
+            return .failed
+        }
+    }
+
+    /// Merges newly received `HTTPCookie` values into an existing cookie dictionary keyed by name.
+    nonisolated static func mergeCookieMap(_ base: [String: HTTPCookie], incoming: [HTTPCookie]) -> [String: HTTPCookie] {
+        var next = base
+        for c in incoming {
+            if let exp = c.expiresDate, exp <= Date() {
+                next.removeValue(forKey: c.name)
+            } else {
+                next[c.name] = c
+            }
+        }
+        return next
+    }
+
+    /// Native `check_qrconnect` poll that works even when ByteDance's in-page JS SDK stopped polling after
+    /// iOS background suspension ("Network Error") or when `WKWebView`'s WebContent process was terminated.
+    /// Captures all `Set-Cookie` headers (and follows `redirect_url` hops if present) into `WKWebsiteDataStore`.
+    func pollQRConnectNative(
+        checkURL: String?,
+        token: String?,
+        csrfToken: String? = nil,
+        traceId: String? = nil
+    ) async -> QRPollResult {
+        guard let url = Self.buildCheckQRURL(checkURL: checkURL, token: token) else { return .failed }
+
+        // Build cookie map from WebKit's live store so passport CSRF + ttwid cookies are included.
+        let storeCookies = await WKWebsiteDataStore.default().httpCookieStore.allCookies().filter { c in
+            let d = c.domain.lowercased()
+            return d == "hongguoduanju.com" || d == ".hongguoduanju.com" || d.hasSuffix(".hongguoduanju.com")
+        }
+        var cookieMap: [String: HTTPCookie] = [:]
+        for c in storeCookies { cookieMap[c.name] = c }
+
+        func cookieHeader(for targetURL: URL) -> String {
+            let host = (targetURL.host ?? "").lowercased()
+            let matching = cookieMap.values.filter { c in
+                let d = c.domain.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+                return host == d || host.hasSuffix("." + d)
+            }
+            if !matching.isEmpty {
+                return matching.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+            }
+            return cachedCookieHeader ?? ""
+        }
+
+        let resolvedCsrf = (csrfToken?.isEmpty == false ? csrfToken : nil)
+            ?? cookieMap["passport_csrf_token"]?.value
+            ?? cookieMap["passport_csrf_token_default"]?.value
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.setValue(Self.pcUserAgent, forHTTPHeaderField: "User-Agent")
+        req.setValue("\(Self.webOrigin)/", forHTTPHeaderField: "Referer")
+        req.setValue("application/json, text/javascript", forHTTPHeaderField: "Accept")
+        let hdr = cookieHeader(for: url)
+        if !hdr.isEmpty { req.setValue(hdr, forHTTPHeaderField: "Cookie") }
+        if let resolvedCsrf, !resolvedCsrf.isEmpty {
+            req.setValue(resolvedCsrf, forHTTPHeaderField: "x-tt-passport-csrf-token")
+        }
+        if let traceId, !traceId.isEmpty {
+            req.setValue(traceId, forHTTPHeaderField: "x-tt-passport-trace-id")
+        }
+
+        final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate {
+            func urlSession(
+                _ session: URLSession,
+                task: URLSessionTask,
+                willPerformHTTPRedirection response: HTTPURLResponse,
+                newRequest request: URLRequest,
+                completionHandler: @escaping (URLRequest?) -> Void
+            ) {
+                completionHandler(nil)
+            }
+        }
+
+        do {
+            let noRedirect = NoRedirectDelegate()
+            let (data, resp) = try await session.data(for: req, delegate: noRedirect)
+            guard let http = resp as? HTTPURLResponse else { return .failed }
+
+            var collected: [HTTPCookie] = []
+            if let fields = http.allHeaderFields as? [String: String], let respURL = http.url ?? URL(string: Self.webOrigin) {
+                let cookies = HTTPCookie.cookies(withResponseHeaderFields: fields, for: respURL)
+                collected.append(contentsOf: cookies)
+                cookieMap = Self.mergeCookieMap(cookieMap, incoming: cookies)
+            }
+
+            let result = Self.parseQRConnectResponse(data)
+            if case .confirmed(let redirectStr) = result {
+                if let redirectStr, let startRedirect = URL(string: redirectStr) {
+                    var currentURL: URL? = startRedirect
+                    var hops = 0
+                    while let nextURL = currentURL, hops < 6 {
+                        hops += 1
+                        var hopReq = URLRequest(url: nextURL)
+                        hopReq.httpMethod = "GET"
+                        hopReq.setValue(Self.pcUserAgent, forHTTPHeaderField: "User-Agent")
+                        hopReq.setValue("\(Self.webOrigin)/", forHTTPHeaderField: "Referer")
+                        let hopCookie = cookieHeader(for: nextURL)
+                        if !hopCookie.isEmpty { hopReq.setValue(hopCookie, forHTTPHeaderField: "Cookie") }
+                        guard let (_, hopResp) = try? await session.data(for: hopReq, delegate: noRedirect),
+                              let hopHTTP = hopResp as? HTTPURLResponse else { break }
+                        if let hopFields = hopHTTP.allHeaderFields as? [String: String] {
+                            let hopCookies = HTTPCookie.cookies(withResponseHeaderFields: hopFields, for: nextURL)
+                            collected.append(contentsOf: hopCookies)
+                            cookieMap = Self.mergeCookieMap(cookieMap, incoming: hopCookies)
+                        }
+                        if (300..<400).contains(hopHTTP.statusCode),
+                           let loc = hopHTTP.value(forHTTPHeaderField: "Location"),
+                           let resolved = URL(string: loc, relativeTo: nextURL)?.absoluteURL {
+                            currentURL = resolved
+                        } else {
+                            currentURL = nil
+                        }
+                    }
+                }
+                if !collected.isEmpty {
+                    await installCookies(collected)
+                }
+                // Update fallback cookie header immediately so `refreshProfile()` can use it even if WebKit is still waking up.
+                let hgCookies = cookieMap.values.filter { c in
+                    let d = c.domain.lowercased()
+                    return d == "hongguoduanju.com" || d == ".hongguoduanju.com" || d.hasSuffix(".hongguoduanju.com")
+                }
+                if !hgCookies.isEmpty {
+                    let merged = hgCookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+                    cachedCookieHeader = merged
+                    UserDefaults.standard.set(merged, forKey: Self.cookieKey)
+                }
+            } else if !collected.isEmpty {
+                await installCookies(collected)
+            }
+            return result
+        } catch {
+            return .failed
+        }
     }
 
     private func saveProfile(_ next: Profile?) {

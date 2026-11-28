@@ -66,11 +66,25 @@ final class LegadoContext {
     var chapter: [String: Any]?
     var nextChapterURL:String?
     var rssArticle:[String:Any]?
+    var batch: LegadoBatchContext?
+    private var ttfHandles: [Int: LegadoTTF] = [:]
+    private static let ttfLock = NSLock()
+    nonisolated(unsafe) private static var ttfCache: [String: LegadoTTF] = [:]
+    nonisolated(unsafe) private static var ttfNextId = 1
+    private static let namedLockGuard = NSLock()
+    nonisolated(unsafe) private static var namedLocks: [String: NSRecursiveLock] = [:]
+    private var heldLocks: [NSRecursiveLock] = []
     var key: String?
     var page: Int?
     var log: [String] = []
     let js = LegadoJS()
     fileprivate var stack: [LegadoAnalyzer] = []
+
+    private func registerTTF(_ ttf: LegadoTTF) -> Int {
+        Self.ttfLock.lock(); let id = Self.ttfNextId; Self.ttfNextId += 1; Self.ttfLock.unlock()
+        ttfHandles[id] = ttf
+        return id
+    }
 
     init(source: LegadoSource) {
         self.source = source
@@ -94,14 +108,44 @@ final class LegadoContext {
             }
             LegadoClient.mergeExploreInfo(source, initial: values(s("initial")), changed: values(s("value"))); return nil
         case "ajax":
-            let r = try LegadoURL.request(s("url"), ctx: self, base: source.bookSourceUrl)
-            return try r.fetch().text
+            let u = s("url")
+            let timeout = a["timeout"] as? Double
+            let eff = (timeout != nil && timeout! > 0 && !u.contains(",{")) ? "\(u),{\"timeout\":\(Int(timeout!))}" : u
+            let r = try LegadoURL.request(eff, ctx: self, base: source.bookSourceUrl)
+            return try r.fetch(source: source).text
+        case "ajaxAll":
+            let urls = (a["urls"] as? [Any] ?? []).map { "\($0)" }
+            let timeout = a["timeout"] as? Double
+            let skipRate = a["skipRateLimit"] as? Bool ?? false
+            var results = [[String: Any]](repeating: [:], count: urls.count)
+            let resLock = NSLock()
+            DispatchQueue.concurrentPerform(iterations: urls.count) { idx in
+                let u = urls[idx]
+                let item: [String: Any]
+                do {
+                    let eff = (timeout != nil && timeout! > 0 && !u.contains(",{")) ? "\(u),{\"timeout\":\(Int(timeout!))}" : u
+                    let subCtx = LegadoContext(source: self.source); subCtx.key = self.key; subCtx.page = self.page
+                    let req = try LegadoURL.request(eff, ctx: subCtx, base: self.source.bookSourceUrl)
+                    let resp = try req.fetch(source: self.source, allowHTTPError: true, skipRateLimit: skipRate)
+                    item = ["body": resp.text, "status": resp.status, "url": resp.url.absoluteString, "headers": resp.headers]
+                } catch {
+                    item = ["body": "", "status": 500, "url": u, "error": error.localizedDescription]
+                }
+                resLock.lock(); results[idx] = item; resLock.unlock()
+            }
+            return results
+        case "resolveUrl":
+            return LegadoURL.absolute(s("url"), base: s("base").isEmpty ? source.bookSourceUrl : s("base"))
         case "connect":
             var r = try LegadoURL.request(s("url"), ctx: self, base: source.bookSourceUrl)
-            if let m = a["method"] as? String { r.request.httpMethod = m; r.request.httpBody = Data(s("body").utf8) }
+            if let m = a["method"] as? String {
+                r.request.httpMethod = m.uppercased()
+                if r.request.httpMethod == "POST" { r.request.httpBody = Data(s("body").utf8) }
+            }
             if let h = a["headers"] as? [String: Any] { for (k, v) in h { r.request.setValue("\(v)", forHTTPHeaderField: k) } }
-            let resp = try r.fetch()
-            return ["body": resp.text, "status": resp.status, "url": resp.url.absoluteString, "headers": resp.headers]
+            if let t = a["timeout"] as? Double, t > 0 { r.request.timeoutInterval = min(max(t / 1000.0, 1), 120) }
+            let resp = try r.fetch(source: source, allowHTTPError: true)
+            return ["body": resp.text, "status": resp.status, "url": resp.url.absoluteString, "headers": resp.headers, "bytes": LegadoBytes.json(resp.body)]
         case "http.bytes":
             guard let url = URL(string: s("url")), ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else { throw LegadoError.rule("书源 HTTP 地址无效") }
             var request = URLRequest(url: url, timeoutInterval: 20)
@@ -141,7 +185,84 @@ final class LegadoContext {
         case "md5": return LegadoJS.md5(s("s"))
         case "encodeURI": return LegadoHTTP.percentEncode(s("s"), charset: a["cs"] as? String)
         case "htmlFormat": return LegadoContent.text(fromHTML: s("s"))
-        case "log": log.append(s("s")); return nil
+        case "log":
+            let msg = s("s")
+            log.append(msg)
+            LegadoTools.emitDebug("log", msg)
+            return nil
+        case "hmac":
+            return LegadoBytes.json(LegadoBytes.hmac(alg: s("alg"), key: LegadoBytes.data(a["key"]), data: LegadoBytes.data(a["b"])))
+        case "sign.sign":
+            return LegadoBytes.json(try LegadoBytes.rsaSign(alg: s("alg"), key: LegadoBytes.data(a["priv"]), data: LegadoBytes.data(a["b"])))
+        case "sign.verify":
+            return try LegadoBytes.rsaVerify(alg: s("alg"), key: LegadoBytes.data(a["pub"]), data: LegadoBytes.data(a["b"]), signature: LegadoBytes.data(a["sig"]))
+        case "toNumChapter":
+            return LegadoFiles.toNumChapter(s("s"))
+        case "ttf.load":
+            let useCache = a["cache"] as? Bool ?? true
+            let b64 = s("b64"), srcArg = s("src")
+            let cacheKey: String? = !b64.isEmpty ? "b64:" + LegadoJS.md5(b64) : (!srcArg.isEmpty ? "src:" + srcArg : nil)
+            if useCache, let k = cacheKey {
+                Self.ttfLock.lock(); let hit = Self.ttfCache[k]; Self.ttfLock.unlock()
+                if let hit { return registerTTF(hit) }
+            }
+            let rawData: Data
+            if !b64.isEmpty {
+                let clean = (b64.components(separatedBy: "base64,").last ?? b64).filter { !$0.isWhitespace }
+                rawData = Data(base64Encoded: clean) ?? Data()
+            } else if a["b"] is [Any] {
+                rawData = LegadoBytes.data(a["b"])
+            } else if srcArg.lowercased().hasPrefix("http://") || srcArg.lowercased().hasPrefix("https://") {
+                rawData = try LegadoFiles.fetchCached(srcArg, ctx: self, saveTimeSec: 3600)
+            } else {
+                let clean = (srcArg.components(separatedBy: "base64,").last ?? srcArg).filter { !$0.isWhitespace }
+                rawData = Data(base64Encoded: clean) ?? Data()
+            }
+            let ttf = LegadoTTF(rawData)
+            if useCache, let k = cacheKey { Self.ttfLock.lock(); Self.ttfCache[k] = ttf; Self.ttfLock.unlock() }
+            return registerTTF(ttf)
+        case "ttf.glyfIdByUni": return ttfHandles[a["id"] as? Int ?? -1]?.getGlyfIdByUnicode(UInt32(max(0, a["u"] as? Int ?? 0))) ?? 0
+        case "ttf.uniByGlyfId": return Int(ttfHandles[a["id"] as? Int ?? -1]?.getUnicodeByGlyfId(a["g"] as? Int ?? 0) ?? 0)
+        case "ttf.glyfById": return ttfHandles[a["id"] as? Int ?? -1]?.getGlyfById(a["g"] as? Int ?? 0)
+        case "ttf.glyfByUni": return ttfHandles[a["id"] as? Int ?? -1]?.getGlyfByUnicode(UInt32(max(0, a["u"] as? Int ?? 0)))
+        case "ttf.uniByGlyf": return Int(ttfHandles[a["id"] as? Int ?? -1]?.getUnicodeByGlyf(s("g")) ?? 0)
+        case "ttf.codeByGlyf": return ttfHandles[a["id"] as? Int ?? -1]?.getCodeByGlyf(s("g")) ?? ""
+        case "ttf.replace":
+            return LegadoTTF.replaceFont(s("text"), errorFont: ttfHandles[a["err"] as? Int ?? -1], correctFont: ttfHandles[a["ok"] as? Int ?? -1], filter: a["filter"] as? Bool ?? false)
+        case "file.importScript": return try LegadoFiles.importScript(s("path"), ctx: self)
+        case "file.cacheFile": return try LegadoFiles.cacheFile(s("url"), ctx: self, saveTimeSec: a["sec"] as? Int ?? 0)
+        case "file.downloadFile": return try LegadoFiles.downloadFile(s("url"), ctx: self)
+        case "file.read": return LegadoFiles.readFile(sourceID: source.bookSourceUrl, path: s("path")).map(LegadoBytes.json)
+        case "file.readTxt": return LegadoFiles.readTxtFile(sourceID: source.bookSourceUrl, path: s("path"), charset: a["cs"] as? String)
+        case "file.delete": return LegadoFiles.deleteFile(sourceID: source.bookSourceUrl, path: s("path"))
+        case "file.exists": return (try? LegadoFiles.safeURL(sourceID: source.bookSourceUrl, relPath: s("path"))).map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        case "file.unzip": return try LegadoFiles.unzipFile(sourceID: source.bookSourceUrl, zipPath: s("path"))
+        case "file.zipStr":
+            guard let d = try LegadoFiles.getZipEntryBytes(s("url"), entryPath: s("path"), ctx: self) else { return "" }
+            return String(data: d, encoding: LegadoHTTP.encoding(a["cs"] as? String) ?? .utf8) ?? String(decoding: d, as: UTF8.self)
+        case "file.zipBytes":
+            return try LegadoFiles.getZipEntryBytes(s("url"), entryPath: s("path"), ctx: self).map(LegadoBytes.json)
+        case "file.txtInFolder": return LegadoFiles.getTxtInFolder(sourceID: source.bookSourceUrl, relDir: s("path"))
+        case "lock.acquire":
+            let k = source.bookSourceUrl + "|" + s("k")
+            Self.namedLockGuard.lock()
+            let nl = Self.namedLocks[k] ?? { let l = NSRecursiveLock(); Self.namedLocks[k] = l; return l }()
+            Self.namedLockGuard.unlock()
+            nl.lock()
+            heldLocks.append(nl)
+            return true
+        case "lock.release":
+            let k = source.bookSourceUrl + "|" + s("k")
+            Self.namedLockGuard.lock(); let nl = Self.namedLocks[k]; Self.namedLockGuard.unlock()
+            if let nl, let idx = heldLocks.lastIndex(where: { $0 === nl }) {
+                nl.unlock(); heldLocks.remove(at: idx)
+            }
+            return true
+        case "tick": return LegadoRateLimit.tick(source.bookSourceUrl, s("name"))
+        case "source.putConcurrent": LegadoRateLimit.putOverride(source.bookSourceUrl, s("v")); return true
+        case "refresh": return true
+        case "batch.cacheContent":
+            return batch?.put(chapterURL: s("chapter"), index: a["index"] as? Int ?? -1, content: s("content")) ?? false
             // Byte arrays travel as JSON number arrays (signed, like Java byte[]).
         case "bytes.enc": return LegadoBytes.json(s("s").data(using: LegadoHTTP.encoding(a["cs"] as? String) ?? .utf8) ?? Data())
         case "bytes.dec":
@@ -222,7 +343,15 @@ final class LegadoContext {
         case "cacheGet": return LegadoSourceState.cacheGet(source.bookSourceUrl, s("k"))
         case "cachePut": LegadoSourceState.cachePut(source.bookSourceUrl, s("k"), a["v"] as? String, seconds: (a["sec"] as? Double) ?? 0); return nil
         case "webView":
-            return try LegadoWebView.run(html: a["html"] as? String, url: (a["url"] as? String).map { LegadoURL.absolute($0, base: source.bookSourceUrl) }, js: a["js"] as? String)
+            let rawUrl = (a["url"] as? String).flatMap { $0.isEmpty ? nil : LegadoURL.absolute($0, base: source.bookSourceUrl) } ?? source.bookSourceUrl
+            let srcRegex = (a["sourceRegex"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let ovRegex = (a["overrideUrlRegex"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            if srcRegex != nil || ovRegex != nil {
+                guard let u = URL(string: rawUrl) else { throw LegadoError.rule("WebView 网址无效") }
+                let hdrs = (try? LegadoURL.headers(ctx: self)) ?? [:]
+                return try LegadoBackstage.load(LegadoBackstageRequest(url: u, headers: hdrs, javaScript: a["js"] as? String, sourceRegex: srcRegex, delayMs: 0, timeout: 30, html: a["html"] as? String, overrideUrlRegex: ovRegex, useCookies: source.cookieJarEnabled)).text
+            }
+            return try LegadoWebView.run(html: a["html"] as? String, url: rawUrl, js: a["js"] as? String)
         case "browser":
             // Only from the login page: during 搜书 / 阅读 several sources run at once and a browser would block them.
             guard interactive else { throw LegadoError.rule("这个操作需要在书源的「登录」页里进行") }
@@ -280,6 +409,10 @@ final class LegadoContext {
         b["chapter"] = chapter.map{$0 as Any} ?? NSNull()
         b["title"] = chapter?["title"] ?? NSNull()
         for (k, v) in extra { b[k] = v }
+        defer {
+            for l in heldLocks.reversed() { l.unlock() }
+            heldLocks.removeAll()
+        }
         return try js.eval(code, b)
     }
 }
@@ -803,11 +936,52 @@ struct LegadoRequest {
     var charset: String?
     /// Legado `type` option: the rule gets the raw body as hex instead of text.
     var type: String?
+    var retry: Int = 0
+    var followRedirects: Bool = true
+    var webView: Bool = false
+    var webJs: String? = nil
+    var webViewDelayMs: Int = 0
+    var overrideUrlRegex: String? = nil
+    var ctx: LegadoContext? = nil
 
-    func fetch() throws -> LegadoResponse {
-        var r = try LegadoHTTP.fetch(request, charset: charset)
-        if let type, !type.isEmpty { r.text = r.body.map { String(format: "%02x", $0) }.joined() }
-        return r
+    func fetch(source: LegadoSource? = nil, allowHTTPError: Bool = false, skipRateLimit: Bool = false, contentWebJs: String? = nil, contentSourceRegex: String? = nil) throws -> LegadoResponse {
+        let s = source ?? ctx?.source
+        let resp: LegadoResponse
+        if webView, let u = request.url {
+            let hdrs = request.allHTTPHeaderFields ?? [:]
+            let bodyStr = request.httpBody.map { String(decoding: $0, as: UTF8.self) }
+            resp = try LegadoBackstage.load(LegadoBackstageRequest(
+                url: u,
+                headers: hdrs,
+                javaScript: webJs ?? contentWebJs,
+                sourceRegex: contentSourceRegex,
+                delayMs: webViewDelayMs,
+                timeout: max(15, request.timeoutInterval),
+                method: request.httpMethod ?? "GET",
+                body: bodyStr,
+                overrideUrlRegex: overrideUrlRegex,
+                useCookies: s?.cookieJarEnabled ?? true
+            ))
+        } else {
+            let attempts = 1 + min(max(0, retry), 5)
+            var lastError: Error?
+            var fetched: LegadoResponse?
+            for i in 0..<attempts {
+                do {
+                    if !skipRateLimit, let s { try LegadoRateLimit.acquire(s.bookSourceUrl, declaredRate: s.concurrentRate) }
+                    var r = try LegadoHTTP.fetch(request, charset: charset, allowHTTPError: allowHTTPError, followRedirects: followRedirects, useCookies: s?.cookieJarEnabled ?? true)
+                    if let type, !type.isEmpty { r.text = r.body.map { String(format: "%02x", $0) }.joined() }
+                    fetched = r
+                    break
+                } catch {
+                    lastError = error
+                    if i + 1 < attempts { Thread.sleep(forTimeInterval: min(Double(i + 1), 3.0)) }
+                }
+            }
+            guard let ok = fetched else { throw lastError ?? LegadoError.network("请求失败") }
+            resp = ok
+        }
+        return resp
     }
 }
 
@@ -857,28 +1031,64 @@ enum LegadoURL {
                 rule = String(rule[..<range.lowerBound])
             }
         }
-        guard let url = resolve(rule, base: base) else { throw LegadoError.rule("网址无效：\(rule)") }
+        // `UrlOption.js`: transform URL before requesting
+        if let jsOpt = options["js"] as? String, !jsOpt.isEmpty {
+            let code = jsOpt.hasPrefix("@js:") ? String(jsOpt.dropFirst(4)) : jsOpt.replacingOccurrences(of: "<js>", with: "").replacingOccurrences(of: "</js>", with: "")
+            let transformed = LegadoAnalyzer.textOf(try ctx.evalJS(code, result: rule, baseURL: base)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !transformed.isEmpty { rule = transformed }
+        }
+        let effectiveOrigin = (options["origin"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? base
+        guard let url = resolve(rule, base: effectiveOrigin) else { throw LegadoError.rule("网址无效：\(rule)") }
         var req = URLRequest(url: url)
+        if let timeoutRaw = options["timeout"] {
+            let ms = (timeoutRaw as? Double) ?? Double("\(timeoutRaw)") ?? 0
+            if ms > 0 { req.timeoutInterval = min(max(ms / 1000.0, 1), 120) }
+        }
         req.setValue(LegadoHTTP.userAgent, forHTTPHeaderField: "User-Agent")
         for (k, v) in try headers(ctx: ctx) { req.setValue(v, forHTTPHeaderField: k) }
         if let h = options["headers"] as? [String: Any] { for (k, v) in h { req.setValue("\(v)", forHTTPHeaderField: k) } }
         else if let hs = options["headers"] as? String, let d = hs.data(using: .utf8), let h = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] {
             for (k, v) in h { req.setValue("\(v)", forHTTPHeaderField: k) }
         }
-        if (options["method"] as? String)?.uppercased() == "POST" {
+        let method = (options["method"] as? String)?.uppercased() ?? "GET"
+        if method == "POST" {
             req.httpMethod = "POST"
             var body: String
             if let b = options["body"] as? String { body = b }
             else if let b = options["body"], JSONSerialization.isValidJSONObject(b), let d = try? JSONSerialization.data(withJSONObject: b) { body = String(decoding: d, as: UTF8.self) }
             else { body = "" }
             body = try substitute(body, ctx: ctx, base: base, charset: charset, encodeKey: !body.hasPrefix("{"))
-            let isJSON = body.trimmingCharacters(in: .whitespaces).hasPrefix("{")
+            if let bjs = options["bodyJs"] as? String, !bjs.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let code = bjs.hasPrefix("@js:") ? String(bjs.dropFirst(4)) : bjs.replacingOccurrences(of: "<js>", with: "").replacingOccurrences(of: "</js>", with: "")
+                body = LegadoAnalyzer.textOf(try ctx.evalJS(code, result: body, baseURL: url.absoluteString))
+            }
+            let isJSON = body.trimmingCharacters(in: .whitespaces).hasPrefix("{") || body.trimmingCharacters(in: .whitespaces).hasPrefix("[")
             if req.value(forHTTPHeaderField: "Content-Type") == nil {
                 req.setValue(isJSON ? "application/json; charset=UTF-8" : "application/x-www-form-urlencoded; charset=\(charset ?? "UTF-8")", forHTTPHeaderField: "Content-Type")
             }
             req.httpBody = isJSON ? Data(body.utf8) : (body.data(using: LegadoHTTP.encoding(charset) ?? .utf8) ?? Data(body.utf8))
+        } else if method == "HEAD" {
+            req.httpMethod = "HEAD"
         }
-        return LegadoRequest(request: req, charset: charset, type: options["type"] as? String)
+        let retry = (options["retry"] as? Int) ?? (options["retry"] as? String).flatMap(Int.init) ?? 0
+        let followRedirects: Bool = {
+            guard let fr = options["followRedirects"] else { return true }
+            if let b = fr as? Bool { return b }
+            return !["false", "0", "no"].contains("\(fr)".lowercased())
+        }()
+        let delayMs = (options["webViewDelayTime"] as? Int) ?? (options["webViewDelayTime"] as? String).flatMap(Int.init) ?? 0
+        return LegadoRequest(
+            request: req,
+            charset: charset,
+            type: options["type"] as? String,
+            retry: retry,
+            followRedirects: followRedirects,
+            webView: LegadoBackstage.useWebView(options["webView"]),
+            webJs: options["webJs"] as? String,
+            webViewDelayMs: min(max(0, delayMs), 30_000),
+            overrideUrlRegex: options["overrideUrlRegex"] as? String,
+            ctx: ctx
+        )
     }
 
     /// Options objects are often not strict JSON (single quotes, unquoted keys, line breaks): Legado reads them
@@ -992,12 +1202,27 @@ enum LegadoBytes {
         })
     }
 
-    /// "AES/CBC/PKCS5Padding", "AES/ECB/NoPadding", "DES/…", "DESede/…".
+    /// "AES/CBC/PKCS5Padding", "AES/GCM/NoPadding", "AES/ECB/NoPadding", "DES/…", "DESede/…".
     static func cipher(_ transformation: String, encrypt: Bool, key: Data, iv: Data?, data: Data) throws -> Data {
         let parts = transformation.uppercased().split(separator: "/").map(String.init)
         let alg = parts.first ?? "AES"
         let mode = parts.count > 1 ? parts[1] : "ECB"
         let padding = parts.count > 2 ? parts[2] : "PKCS5PADDING"
+        if alg == "AES", mode == "GCM" {
+            let symKey = SymmetricKey(data: key)
+            let nonceData = iv ?? Data(count: 12)
+            let nonce = try AES.GCM.Nonce(data: nonceData)
+            if encrypt {
+                let sealed = try AES.GCM.seal(data, using: symKey, nonce: nonce)
+                return sealed.ciphertext + sealed.tag
+            } else {
+                guard data.count >= 16 else { throw LegadoError.rule("GCM 密文长度不足") }
+                let ct = data.prefix(data.count - 16)
+                let tag = data.suffix(16)
+                let box = try AES.GCM.SealedBox(nonce: nonce, ciphertext: ct, tag: tag)
+                return try AES.GCM.open(box, using: symKey)
+            }
+        }
         let (algorithm, block): (CCAlgorithm, Int) = alg.hasPrefix("DESEDE") || alg == "3DES" ? (CCAlgorithm(kCCAlgorithm3DES), kCCBlockSize3DES)
         : alg.hasPrefix("DES") ? (CCAlgorithm(kCCAlgorithmDES), kCCBlockSizeDES) : (CCAlgorithm(kCCAlgorithmAES), kCCBlockSizeAES128)
         var options = CCOptions(0)
@@ -1012,6 +1237,50 @@ enum LegadoBytes {
                     } } } }
         guard status == kCCSuccess else { throw LegadoError.rule("解密失败（\(transformation)）") }
         return out.prefix(moved)
+    }
+
+    static func hmac(alg: String, key: Data, data: Data) -> Data {
+        let norm = alg.uppercased().replacingOccurrences(of: "-", with: "")
+        let ccAlg: CCHmacAlgorithm
+        let len: Int
+        switch norm {
+        case "HMACMD5", "MD5": ccAlg = CCHmacAlgorithm(kCCHmacAlgMD5); len = Int(CC_MD5_DIGEST_LENGTH)
+        case "HMACSHA1", "SHA1": ccAlg = CCHmacAlgorithm(kCCHmacAlgSHA1); len = Int(CC_SHA1_DIGEST_LENGTH)
+        case "HMACSHA512", "SHA512": ccAlg = CCHmacAlgorithm(kCCHmacAlgSHA512); len = Int(CC_SHA512_DIGEST_LENGTH)
+        default: ccAlg = CCHmacAlgorithm(kCCHmacAlgSHA256); len = Int(CC_SHA256_DIGEST_LENGTH)
+        }
+        var out = Data(count: len)
+        out.withUnsafeMutableBytes { o in
+            key.withUnsafeBytes { k in
+                data.withUnsafeBytes { d in
+                    CCHmac(ccAlg, k.baseAddress, key.count, d.baseAddress, data.count, o.baseAddress)
+                }
+            }
+        }
+        return out
+    }
+
+    private static func secSignAlg(_ alg: String) -> SecKeyAlgorithm {
+        let u = alg.uppercased()
+        if u.contains("SHA512") { return .rsaSignatureMessagePKCS1v15SHA512 }
+        if u.contains("SHA1") { return .rsaSignatureMessagePKCS1v15SHA1 }
+        return .rsaSignatureMessagePKCS1v15SHA256
+    }
+
+    static func rsaSign(alg: String, key: Data, data: Data) throws -> Data {
+        let attrs: [CFString: Any] = [kSecAttrKeyType: kSecAttrKeyTypeRSA, kSecAttrKeyClass: kSecAttrKeyClassPrivate]
+        var err: Unmanaged<CFError>?
+        guard let k = SecKeyCreateWithData(key as CFData, attrs as CFDictionary, &err),
+              let sig = SecKeyCreateSignature(k, secSignAlg(alg), data as CFData, &err) as Data? else {
+            throw LegadoError.rule("RSA 签名失败")
+        }
+        return sig
+    }
+
+    static func rsaVerify(alg: String, key: Data, data: Data, signature: Data) throws -> Bool {
+        let k = try publicKey(key)
+        var err: Unmanaged<CFError>?
+        return SecKeyVerifySignature(k, secSignAlg(alg), data as CFData, signature as CFData, &err)
     }
 
     // MARK: RSA (hutool-style AsymmetricCrypto)

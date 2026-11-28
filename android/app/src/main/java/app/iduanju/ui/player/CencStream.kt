@@ -92,10 +92,14 @@ internal class CencFile(
     // Worker only.
     private var layout: CencLayout? = null
     @Volatile private var urlIndex = 0
+    @Volatile private var activeCall: okhttp3.Call? = null
     private var ranged = false
 
     @Volatile var complete = false
         private set
+
+    val isFailed: Boolean get() = lock.withLock { fatal != null && !complete }
+    val isClosed: Boolean get() = lock.withLock { closed }
 
     /** Download the first [bytes] even while nobody reads (next-episode warm-up; Long.MAX_VALUE = all of it). */
     fun prefetch(bytes: Long) = lock.withLock {
@@ -104,11 +108,26 @@ internal class CencFile(
     }
 
     /** A freshly resolved address of the same file: what is already here stays valid. */
-    fun renew(fresh: List<String>) = lock.withLock {
-        if (complete || fresh.isEmpty() || fresh == urls) return@withLock
-        urls = fresh
-        urlIndex = 0
-        fatal = null
+    fun renew(fresh: List<String>) {
+        var cancelHung = false
+        lock.withLock {
+            if (complete || closed || fresh.isEmpty()) return
+            val urlsChanged = fresh != urls
+            if (!urlsChanged && fatal == null) return
+            if (urlsChanged) urls = fresh
+            urlIndex = 0
+            fatal = null
+            if (urlsChanged && !ready && worker?.isActive == true) {
+                cancelHung = true
+                worker?.cancel()
+                worker = null
+            }
+            changed.signalAll()
+        }
+        if (cancelHung) {
+            runCatching { activeCall?.cancel() }
+            lock.withLock { if (!closed && (readers > 0 || prefetchLimit > 0L)) startWorker() }
+        }
     }
 
     /** Stop background downloading; a reader that comes back restarts it. */
@@ -117,7 +136,10 @@ internal class CencFile(
     fun attach(position: Long) = lock.withLock {
         readers++
         wanted = position
-        fatal = null
+        if (fatal != null) {
+            fatal = null
+            urlIndex = 0
+        }
         startWorker()
         changed.signalAll()
     }
@@ -131,6 +153,7 @@ internal class CencFile(
 
     fun shutdown() {
         lock.withLock { closed = true; changed.signalAll() }
+        runCatching { activeCall?.cancel() }
         worker?.cancel()
         synchronized(io) { runCatching { raf?.close() }; raf = null }
         if (!complete) part.delete()
@@ -213,7 +236,9 @@ internal class CencFile(
         val all = urls
         val req = Request.Builder().url(all[urlIndex.coerceIn(0, all.lastIndex)]).header("Range", range).header("Accept-Encoding", "identity")
             .apply { headers.forEach { (k, v) -> header(k, v) } }.build()
-        val resp = PlayerHttp.client.newCall(req).execute()
+        val call = PlayerHttp.client.newCall(req)
+        activeCall = call
+        val resp = try { call.execute() } finally { if (activeCall === call) activeCall = null }
         if (!resp.isSuccessful) { resp.close(); throw Http(resp.code) }
         return resp
     }
@@ -380,13 +405,23 @@ internal class CencFile(
 
 /** Open CENC episodes, most recently used last. */
 internal object CencStore {
-    private const val MAX_OPEN = 5
-    private val files = LinkedHashMap<String, CencFile>(8, 0.75f, true)
+    private const val MAX_OPEN = 8
+    private val files = LinkedHashMap<String, CencFile>(12, 0.75f, true)
 
     @Synchronized fun get(id: String): CencFile? = files[id]
 
+    @Synchronized fun remove(id: String) {
+        files.remove(id)?.shutdown()
+    }
+
     @Synchronized fun open(id: String, urls: List<String>, create: () -> CencFile): CencFile {
-        files[id]?.let { it.renew(urls); return it }
+        files[id]?.let { existing ->
+            if (!existing.isClosed) {
+                existing.renew(urls)
+                return existing
+            }
+            files.remove(id)
+        }
         val f = create()
         files[id] = f
         val it = files.entries.iterator()

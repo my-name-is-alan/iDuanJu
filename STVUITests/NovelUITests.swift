@@ -422,4 +422,77 @@ final class NovelUITests: XCTestCase {
         shot("rank_ios_03_real_toc")
     }
 
+    /// Regression: jumping straight to a far chapter from 目录 in a 500-chapter book must render immediately
+    /// and stay clickable in both 上下滚动 (scroll) and paged modes (滑动 / 仿真 / 覆盖).
+    func testLargeBookScrollAndPagedTocJumpDoesNotFreeze() throws {
+        continueAfterFailure = false
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("novel_500_chapters.txt")
+        var text = ""
+        for i in 1...500 {
+            text += "第\(i)章 远征\(i)\n"
+            for p in 1...10 {
+                text += "这是第\(i)章第\(p)段测试正文，用于验证长篇小说从目录直接跳转指定章节时不会白屏卡死且界面保持响应。\n"
+            }
+        }
+        try Data(text.utf8).write(to: tmp)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        app = XCUIApplication()
+        app.launchEnvironment["STV_HOME_TAB"] = "novel"
+        app.launchEnvironment["STV_NOVEL_SEED"] = tmp.path
+        app.launch()
+
+        let book = el("novel.book.novel_500_chapters")
+        XCTAssertTrue(book.waitForExistence(timeout: 10), "500-chapter book not on shelf")
+        book.tap()
+        XCTAssertTrue(el("novel.page").waitForExistence(timeout: 5) || el("novel.scroll.title").waitForExistence(timeout: 5))
+
+        let win = app.windows.firstMatch
+        // Switch to 上下滚动 (rawValue 4) first, which previously froze / blanked on TOC jump.
+        setTurn(4)
+        XCTAssertTrue(el("novel.scroll.title").waitForExistence(timeout: 5), "scroll reader did not appear")
+
+        // Open 目录, jump to a distant chapter via 搜本书 or scrolling TOC, then verify content + responsiveness.
+        win.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(el("novel.menu.目录").waitForExistence(timeout: 3))
+        el("novel.menu.目录").tap()
+        let searchField = app.textFields["搜本书"]
+        XCTAssertTrue(searchField.waitForExistence(timeout: 3))
+        searchField.tap()
+        searchField.typeText("第350章第1段\n")
+        let hit = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "第350章 远征350")).firstMatch
+        XCTAssertTrue(hit.waitForExistence(timeout: 10), "search hit for chapter 350 missing")
+        hit.tap()
+
+        let scrollCh = el("novel.scroll.chapter.349")
+        XCTAssertTrue(scrollCh.waitForExistence(timeout: 5), "scroll mode went blank or hung after jumping to chapter 350")
+        XCTAssertEqual(el("novel.scroll.title").label, "第350章 远征350")
+
+        // Verify the screen is still responsive to center taps (can open menu & TOC again) and pick chapter 355 directly from TOC.
+        win.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(el("novel.menu.目录").waitForExistence(timeout: 3), "reader became unclickable after scroll TOC jump")
+        el("novel.menu.目录").tap()
+        let ch355 = app.buttons["第355章 远征355"]
+        XCTAssertTrue(ch355.waitForExistence(timeout: 5), "TOC did not center near chapter 350")
+        ch355.tap()
+        XCTAssertTrue(el("novel.scroll.chapter.354").waitForExistence(timeout: 5), "direct TOC tap in scroll mode did not render chapter 355")
+
+        // Verify 仿真 (curl = 0) and 滑动 (slide = 1) direct TOC jump too.
+        for style in [0, 1] {
+            setTurn(style)
+            win.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            XCTAssertTrue(el("novel.menu.目录").waitForExistence(timeout: 3))
+            el("novel.menu.目录").tap()
+            let target = style == 0 ? "第356章 远征356" : "第357章 远征357"
+            let btn = app.buttons[target]
+            XCTAssertTrue(btn.waitForExistence(timeout: 5))
+            btn.tap()
+            XCTAssertTrue(app.staticTexts[target].waitForExistence(timeout: 5), "paged style \(style) failed to render \(target)")
+            // Tap center to prove UI stays interactive after jump.
+            win.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            XCTAssertTrue(el("novel.menu.目录").waitForExistence(timeout: 3), "paged style \(style) became unclickable after TOC jump")
+            win.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12)).tap()
+        }
+    }
+
 }

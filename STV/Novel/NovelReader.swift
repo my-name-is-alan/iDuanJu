@@ -84,14 +84,16 @@ enum NovelLayout {
         let lm = NSLayoutManager()
         storage.addLayoutManager(lm)
         var pages: [NSRange] = []
-        while true {
+        var lastGlyphEnd = -1
+        while pages.count < 4000 {
             let tc = NSTextContainer(size: size)
             tc.lineFragmentPadding = 0
             lm.addTextContainer(tc)
             let g = lm.glyphRange(for: tc)
-            if g.length == 0 { break }
+            if g.length == 0 || NSMaxRange(g) <= lastGlyphEnd { break }
+            lastGlyphEnd = NSMaxRange(g)
             pages.append(lm.characterRange(forGlyphRange: g, actualGlyphRange: nil))
-            if NSMaxRange(g) >= lm.numberOfGlyphs { break }
+            if lastGlyphEnd >= lm.numberOfGlyphs { break }
         }
         return pages.isEmpty ? [NSRange(location: 0, length: s.length)] : pages
     }
@@ -137,12 +139,15 @@ struct NovelPagedView: UIViewControllerRepresentable {
         c.onPageChange = onPage
         c.onCenterTap = onCenter
         c.onSwipeUp = onSwipeUp
-        let relayout = handle.version != version || c.insets != insets
+        let insetsChanged = c.insets != insets
+        let versionChanged = handle.version != version
         c.insets = insets
         handle.version = version
         c.setStyle(style)
         c.highlight = highlight
-        if relayout || c.current != start { c.show(start) }
+        if insetsChanged || versionChanged || c.current != start {
+            c.show(start, forceRebuild: insetsChanged)
+        }
     }
 }
 
@@ -181,10 +186,17 @@ struct NovelReaderView: View {
     @State private var seekFraction: Double?
     @State private var showDownloads = false
     @State private var showSources = false
+    @State private var showReviews = false
     @State private var choosingVoice = false
     /// Listing the system voices is slow: once, when 听书 is opened.
     @State private var voices: [AVSpeechSynthesisVoice] = []
     @State private var relayoutTask: Task<Void, Never>?
+    /// Bounded chapter window for scroll mode so jumping to chapter N never walks 0...N in a LazyVStack.
+    @State private var scrollWindow: ClosedRange<Int> = 0...0
+    @State private var scrollEpoch = 0
+    @State private var suppressScrollTrackUntil = Date.distantPast
+    @State private var lastSavedChapter = -1
+    @State private var lastSavedOffset = -1
     @Namespace private var glassNS
     @Namespace private var toolNS
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -204,13 +216,18 @@ struct NovelReaderView: View {
     private var highlight: NovelHighlight? { speaker.sentence.map { NovelHighlight(chapter: speaker.chapter, range: $0) } }
     private func title(_ i: Int) -> String { book.chapters.indices.contains(i) ? book.chapters[i].title : "" }
 
+    private var currentSource: LegadoSource? { book.sourceURL.flatMap { LegadoSourceStore.shared.source($0) } }
+    private var isScrollMode: Bool {
+        prefs.turn == .scroll || currentSource?.isImage == true || paginator.hasCachedImages(ref.chapter)
+    }
+
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .bottom) {
                 pal.bg.ignoresSafeArea()
                 if ready {
                     Group {
-                        if prefs.turn == .scroll {
+                        if isScrollMode {
                             scrollReader(geo)
                                 .frame(maxWidth: layout.readerMaxWidth)
                                 .frame(maxWidth: .infinity)
@@ -220,8 +237,6 @@ struct NovelReaderView: View {
                                 onPage: { r in ref = r; save() },
                                 onCenter: { menu ? hideMenu() : showMenu() },
                                 onSwipeUp: { showMenu() })
-                                .frame(maxWidth: layout.readerMaxWidth)
-                                .frame(maxWidth: .infinity)
                                 .ignoresSafeArea()
                         }
                     }
@@ -251,12 +266,24 @@ struct NovelReaderView: View {
                 bottomGlass(geo)
             }
             .onAppear {
+                MusicPlayerEngine.shared.enterImmersive("novelReader")
                 configure(PageBox(geo)); restore()
                 if savedBrightness == nil { savedBrightness = screen?.brightness }
                 brightness = Double(screen?.brightness ?? 0.5)
                 if book.isWeb {
                     loader.prefetch(book, around: ref.chapter)
-                    Task { _ = try? await loader.refreshToc(book) }
+                    Task {
+                        _ = try? await loader.refreshToc(book)
+                        if let updated = store.book(book.id), updated.chapters.count > book.chapters.count {
+                            let cur = ref
+                            let st = paginator.style
+                            book = updated
+                            let nextPaginator = NovelPaginator(book: updated)
+                            if let st { nextPaginator.configure(st) }
+                            paginator = nextPaginator
+                            ref = cur
+                        }
+                    }
                 }
             }
             .compatOnChange(of: layoutKey(geo)) { scheduleRelayout(geo) }
@@ -264,6 +291,17 @@ struct NovelReaderView: View {
         }
         .statusBarHidden(!menu)
         .sheet(isPresented: $showDownloads) { NovelDownloadView(book: book, chapter: ref.chapter) }
+        .sheet(isPresented: $showReviews) {
+            if let src = currentSource, book.chapters.indices.contains(ref.chapter) {
+                let chURL = (book.chapterURLs?.indices.contains(ref.chapter) == true ? book.chapterURLs![ref.chapter] : "")
+                NovelReviewSheet(
+                    source: src,
+                    chapter: LegadoChapter(title: book.chapters[ref.chapter].title, url: chURL, index: ref.chapter),
+                    bookTitle: book.title,
+                    bookURL: book.bookURL ?? ""
+                )
+            }
+        }
         .sheet(isPresented: $showSources) {
             if let sourceURL = book.sourceURL, let bookURL = book.bookURL {
                 NavigationStack {
@@ -283,15 +321,33 @@ struct NovelReaderView: View {
                    label: { id in voices.first { $0.identifier == id }.map(NovelSpeaker.label) ?? "系统默认" })
         .stvLocalColorScheme(prefs.theme == .night ? .dark : .light)
         .compatOnChange(of: speaker.sentence) { s in if let s { follow(s) } }
-        .compatOnChange(of: loader.revision) {
-            guard book.isWeb else { return }
-            let c = ref.chapter, o = offsetInChapter
-            paginator.invalidate()
-            ref = paginator.ref(chapter: c, offset: o)
-            version += 1
+        .compatOnChange(of: loader.lastEvent) { event in
+            guard book.isWeb, event.bookID == nil || event.bookID == book.id else { return }
+            if let ch = event.chapter {
+                paginator.invalidate(chapter: ch)
+                if isScrollMode {
+                    if scrollWindow.contains(ch) { version += 1 }
+                } else if ch == ref.chapter {
+                    let o = offsetInChapter
+                    ref = paginator.ref(chapter: ch, offset: o)
+                    version += 1
+                } else if abs(ch - ref.chapter) <= 1 {
+                    handle.controller?.reloadNeighbours()
+                }
+            } else {
+                let c = ref.chapter, o = offsetInChapter
+                paginator.invalidate()
+                if isScrollMode {
+                    version += 1
+                } else {
+                    ref = paginator.ref(chapter: c, offset: o)
+                    version += 1
+                }
+            }
         }
         .compatOnChange(of: ref.chapter) { c in if book.isWeb { loader.prefetch(book, around: c) } }
         .onDisappear {
+            MusicPlayerEngine.shared.leaveImmersive("novelReader")
             relayoutTask?.cancel()
             loader.cancelPrefetch(book)
             store.addReadTime(book, Date().timeIntervalSince(opened))
@@ -336,7 +392,8 @@ struct NovelReaderView: View {
 
     private func pageStyle(_ box: PageBox) -> NovelPageStyle {
         let p = pal
-        let pageW = (layout.readerMaxWidth.map { min(box.size.width, $0) } ?? box.size.width) - 2 * hMargin
+        let containerW = layout.readerMaxWidth.map { min(box.size.width, $0) } ?? box.size.width
+        let pageW = containerW - 2 * hMargin
         return NovelPageStyle(size: CGSize(width: max(1, pageW), height: max(1, box.size.height - 62)),
             fontSize: prefs.fontSize, lineSpacing: prefs.lineSpacing, indent: prefs.indent, fontID: prefs.fontID,
             text: p.text, secondary: UIColor(p.secondary), background: UIColor(p.bg),
@@ -345,47 +402,121 @@ struct NovelReaderView: View {
 
     private func configure(_ box: PageBox) {
         _ = fonts.isReady(prefs.fontID)
-        insets = UIEdgeInsets(top: box.safe.top, left: hMargin + box.safe.leading,
-            bottom: box.safe.bottom, right: hMargin + box.safe.trailing)
+        let containerW = layout.readerMaxWidth.map { min(box.size.width, $0) } ?? box.size.width
+        let extraH = max(0, (box.size.width - containerW) / 2)
+        insets = UIEdgeInsets(top: box.safe.top, left: hMargin + extraH + box.safe.leading,
+            bottom: box.safe.bottom, right: hMargin + extraH + box.safe.trailing)
         paginator.configure(pageStyle(box))
     }
 
     /// Re-paginates and stays on the page holding the same text.
     private func relayout(_ box: PageBox) {
-        let chapter = ref.chapter, offset = offsetInChapter
+        let chapter = ref.chapter, offset = isScrollMode ? 0 : offsetInChapter
         configure(box)
-        ref = paginator.ref(chapter: chapter, offset: offset)
-        version += 1
+        if !isScrollMode {
+            ref = paginator.ref(chapter: chapter, offset: offset)
+            version += 1
+        }
     }
 
-    // MARK: Scroll mode (continuous across chapters)
+    private func resetScrollWindow(around chapter: Int) {
+        guard !book.chapters.isEmpty else { scrollWindow = 0...0; return }
+        let c = min(max(0, chapter), book.chapters.count - 1)
+        let end = min(book.chapters.count - 1, c + 1)
+        scrollWindow = c...end
+        scrollEpoch += 1
+        suppressScrollTrackUntil = Date().addingTimeInterval(0.35)
+    }
+
+    // MARK: Scroll mode (sliding chapter window so jumping to any chapter is O(1) and never freezes)
 
     private func scrollReader(_ geo: GeometryProxy) -> some View {
-        ScrollViewReader { proxy in
+        let validLower = min(max(0, scrollWindow.lowerBound), max(0, book.chapters.count - 1))
+        let validUpper = min(max(validLower, scrollWindow.upperBound), max(0, book.chapters.count - 1))
+        let visibleRange = book.chapters.isEmpty ? [] : Array(validLower...validUpper)
+        return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 36) {
-                    ForEach(book.chapters.indices, id: \.self) { i in
-                        NovelTextView(text: scrollText(i))
-                            .id(i)
-                            .compatOnFrame(in: .named("novel.scroll")) { f in
+                    if validLower > 0 {
+                        Button { jump(chapter: validLower - 1, offset: 0, keepMenu: true) } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "arrow.up.circle")
+                                Text("上一章 · \(title(validLower - 1))").lineLimit(1)
+                            }
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(pal.secondary)
+                            .frame(maxWidth: .infinity, minHeight: 40)
+                            .background(Capsule().fill(fill))
+                            .contentShape(Capsule())
+                        }
+                        .buttonStyle(PressScale(scale: 0.98))
+                    }
+                    ForEach(visibleRange, id: \.self) { i in
+                        VStack(alignment: .leading, spacing: 12) {
+                            if let src = currentSource, paginator.hasCachedImages(i) {
+                                ForEach(splitChapterSegments(paginator.scrollChapter(i).string)) { seg in
+                                    switch seg {
+                                    case .text(_, let chunk):
+                                        Text(chunk)
+                                            .font(.system(size: prefs.fontSize))
+                                            .foregroundStyle(pal.ink)
+                                            .lineSpacing(prefs.fontSize * (0.25 + 0.75 * prefs.lineSpacing))
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                    case .image(_, let imgURL):
+                                        NovelDecodedImageView(source: src, url: imgURL)
+                                    }
+                                }
+                            } else {
+                                NovelTextView(text: scrollText(i))
+                                    .accessibilityElement()
+                                    .accessibilityLabel(title(i))
+                                    .accessibilityValue(scrollText(i).string)
+                                    .accessibilityIdentifier("novel.scroll.chapter.\(i)")
+                            }
+                            if book.isWeb, let err = loader.error(book, i) {
+                                Button { loader.retry(book, i) } label: {
+                                    Label("重新加载本章", systemImage: "arrow.clockwise")
+                                        .font(.system(size: 13, weight: .medium))
+                                        .foregroundStyle(pal.ink)
+                                        .padding(.horizontal, 14).frame(height: 36)
+                                        .background(Capsule().fill(fill))
+                                }
+                                .buttonStyle(PressScale())
+                                .accessibilityHint(err)
+                            }
+                        }
+                        .id(i)
+                        .task(id: "\(book.id)|\(i)|\(loader.revision)") {
+                            if book.isWeb { loader.ensure(book, i) }
+                        }
+                        .onAppear {
+                            if i == validUpper, validUpper + 1 < book.chapters.count {
+                                scrollWindow = validLower...(validUpper + 1)
+                            }
+                        }
+                        .compatOnFrame(in: .named("novel.scroll")) { f in
                             trackScroll(i, f)
                         }
                     }
                 }
                 .padding(.horizontal, hMargin).padding(.top, 36).padding(.bottom, 80)
             }
+            .id(scrollEpoch)
             .coordinateSpace(name: "novel.scroll")
             .scrollIndicators(.hidden)
             .overlay(alignment: .topLeading) {
                 Text(title(ref.chapter)).font(.system(size: 12)).foregroundStyle(pal.secondary)
                     .padding(.horizontal, hMargin).frame(maxWidth: .infinity, minHeight: 28, alignment: .leading).background(pal.bg)
+                    .accessibilityIdentifier("novel.scroll.title")
             }
-            .onAppear { proxy.scrollTo(ref.chapter, anchor: .top) }
-            .compatOnChange(of: version) { proxy.scrollTo(ref.chapter, anchor: .top) }
+            .contentShape(Rectangle())
             .onTapGesture { menu ? hideMenu() : showMenu() }
             .compatOnChange(of: speaker.sentence) { s in
                 // 听书 in scroll mode: keep the sentence on screen (anchor at the same relative position).
                 guard let s, book.chapters.indices.contains(speaker.chapter) else { return }
+                if !scrollWindow.contains(speaker.chapter) {
+                    resetScrollWindow(around: speaker.chapter)
+                }
                 let len = max(1, book.chapters[speaker.chapter].length)
                 withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(speaker.chapter, anchor: UnitPoint(x: 0, y: min(1, Double(s.location) / Double(len)))) }
             }
@@ -393,7 +524,10 @@ struct NovelReaderView: View {
     }
 
     private func scrollText(_ i: Int) -> NSAttributedString {
-        let t = paginator.chapter(i).text
+        // Touch loader.revision & version so SwiftUI refreshes when a web chapter finishes or fails.
+        _ = loader.revision
+        _ = version
+        let t = paginator.scrollChapter(i)
         guard let h = highlight, h.chapter == i, NSMaxRange(h.range) <= t.length else { return t }
         let m = NSMutableAttributedString(attributedString: t)
         m.addAttribute(.backgroundColor, value: UIColor(NovelLayout.accent).withAlphaComponent(0.22), range: h.range)
@@ -401,10 +535,12 @@ struct NovelReaderView: View {
     }
 
     private func trackScroll(_ i: Int, _ f: CGRect) {
-        guard f.minY <= 40, f.maxY > 40, f.height > 0 else { return }
-        let len = book.chapters.indices.contains(i) ? book.chapters[i].length : 0
-        let r = paginator.ref(chapter: i, offset: Int(Double(len) * Double((40 - f.minY) / f.height)))
-        if r != ref { ref = r; save() }
+        guard Date() >= suppressScrollTrackUntil, f.minY <= 40, f.maxY > 40, f.height > 0 else { return }
+        let r = NovelPageRef(chapter: i, index: 0)
+        if r.chapter != ref.chapter {
+            ref = r
+            save()
+        }
     }
 
     // MARK: Floating glass: top bar, toolbar ↔ panel, 听书
@@ -425,7 +561,14 @@ struct NovelReaderView: View {
                 Spacer(minLength: 0)
                 if book.isWeb {
                     HStack(spacing: 0) {
-                        Button { save(); showSources = true } label: { Text("换源").font(.system(size: 15, weight: .medium)).padding(.leading, 18).padding(.trailing, 10).frame(minHeight: 46).contentShape(Rectangle()) }
+                        if let src = currentSource, LegadoReview.isEnabled(src) {
+                            Button { showReviews = true } label: {
+                                Label("段评", systemImage: "text.bubble")
+                                    .font(.system(size: 14, weight: .medium))
+                                    .padding(.leading, 14).padding(.trailing, 8).frame(minHeight: 46).contentShape(Rectangle())
+                            }
+                        }
+                        Button { save(); showSources = true } label: { Text("换源").font(.system(size: 15, weight: .medium)).padding(.leading, 14).padding(.trailing, 10).frame(minHeight: 46).contentShape(Rectangle()) }
                         Button { showDownloads = true } label: { Image(systemName: "arrow.down.circle").font(.system(size: 19, weight: .medium)).padding(.leading, 8).padding(.trailing, 16).frame(minHeight: 46).contentShape(Rectangle()) }
                             .accessibilityLabel("缓存与下载")
                     }
@@ -454,6 +597,10 @@ struct NovelReaderView: View {
                     miniPlayer.liquidGlassID("listen", in: glassNS).padding(.trailing, 16).padding(.bottom, 40)
                 }
                 if menu {
+                    ReaderMusicMiniBar()
+                        .padding(.horizontal, 16)
+                        .frame(maxWidth: 560).frame(maxWidth: .infinity)
+                        .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
                     surface(geo)
                         .padding(.horizontal, 12)
                         .frame(maxWidth: 560).frame(maxWidth: .infinity)
@@ -743,11 +890,16 @@ struct NovelReaderView: View {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
                 ForEach(NovelTurnStyle.allCases) { t in
                     chip(t.label, on: prefs.turn == t, id: "novel.turn.\(t.rawValue)") {
-                        let c = ref.chapter, o = offsetInChapter
+                        let c = ref.chapter, o = isScrollMode ? 0 : offsetInChapter
                         prefs.turn = t
                         autoTurn = false
-                        ref = paginator.ref(chapter: c, offset: o)
-                        version += 1
+                        if t == .scroll {
+                            ref = NovelPageRef(chapter: c, index: 0)
+                            resetScrollWindow(around: c)
+                        } else {
+                            ref = paginator.ref(chapter: c, offset: o)
+                            version += 1
+                        }
                     }
                 }
             }
@@ -795,7 +947,9 @@ struct NovelReaderView: View {
 
     // 目录 / 搜本书
     private var tocPanel: some View {
-        let per = max(1, Double(paginator.chapter(ref.chapter).text.length) / Double(max(1, paginator.pageCount(ref.chapter))))
+        let per: Double = isScrollMode
+            ? 400
+            : max(1, Double(paginator.chapter(ref.chapter).text.length) / Double(max(1, paginator.pageCount(ref.chapter))))
         return VStack(spacing: 10) {
             HStack(spacing: 0) {
                 HStack(spacing: 6) {
@@ -847,7 +1001,7 @@ struct NovelReaderView: View {
     private func tocRow(_ i: Int, _ per: Double) -> some View {
         let cur = i == ref.chapter
         return VStack(alignment: .leading, spacing: 0) {
-            Button { go(i); hideMenu() } label: {
+            Button { jump(chapter: i, offset: 0) } label: {
                 HStack {
                     Text(title(i)).font(.system(size: 16, weight: cur ? .bold : .regular)).foregroundStyle(cur ? NovelLayout.accent : pal.ink).lineLimit(1)
                     Spacer()
@@ -984,7 +1138,13 @@ struct NovelReaderView: View {
     private func restore() {
         let p = store.progress[book.id]
         let c = min(max(0, p?.chapter ?? 0), max(0, book.chapters.count - 1))
-        ref = paginator.ref(chapter: c, offset: p?.offset ?? 0)
+        if prefs.turn == .scroll || currentSource?.isImage == true {
+            ref = NovelPageRef(chapter: c, index: 0)
+            resetScrollWindow(around: c)
+        } else {
+            ref = paginator.ref(chapter: c, offset: p?.offset ?? 0)
+            if paginator.hasCachedImages(c) { resetScrollWindow(around: c) }
+        }
         ready = true
     }
 
@@ -994,19 +1154,28 @@ struct NovelReaderView: View {
     }
 
     private func jump(chapter i: Int, offset: Int, keepMenu: Bool = false) {
-        ref = paginator.ref(chapter: i, offset: offset)
-        version += 1
-        save()
-        if speaker.active { startListening() }
+        guard book.chapters.indices.contains(i) else { return }
         if !keepMenu { hideMenu() }
+        if prefs.turn == .scroll || currentSource?.isImage == true {
+            ref = NovelPageRef(chapter: i, index: 0)
+            resetScrollWindow(around: i)
+            if book.isWeb { loader.prefetch(book, around: i) }
+        } else {
+            ref = paginator.ref(chapter: i, offset: offset)
+            if paginator.hasCachedImages(i) {
+                resetScrollWindow(around: i)
+            } else {
+                version += 1
+            }
+        }
+        save(force: true)
+        if speaker.active { startListening() }
     }
 
     private func jump(toFraction f: Double) {
         let target = Int(f * Double(totalChars))
         let i = book.chapters.lastIndex { $0.start <= target } ?? 0
-        ref = paginator.ref(chapter: i, offset: target - book.chapters[i].start)
-        version += 1
-        save()
+        jump(chapter: i, offset: target - book.chapters[i].start, keepMenu: true)
     }
 
     private func search() {
@@ -1052,17 +1221,17 @@ struct NovelReaderView: View {
     private func listenChapter(_ d: Int) {
         let c = (speaker.active ? speaker.chapter : ref.chapter) + d
         guard book.chapters.indices.contains(c) else { return }
-        ref = paginator.ref(chapter: c, offset: 0)
-        version += 1
+        jump(chapter: c, offset: 0, keepMenu: true)
         startListening()
     }
 
     /// Keeps the page on the sentence being read (turning with the current animation when it is the next page).
     private func follow(_ s: NSRange) {
-        let target = paginator.ref(chapter: speaker.chapter, offset: s.location)
+        let target = isScrollMode ? NovelPageRef(chapter: speaker.chapter, index: 0) : paginator.ref(chapter: speaker.chapter, offset: s.location)
         guard target != ref else { return }
-        if prefs.turn == .scroll {
+        if isScrollMode {
             ref = target // the scroll view follows the sentence itself (scrollReader)
+            if !scrollWindow.contains(speaker.chapter) { resetScrollWindow(around: speaker.chapter) }
         } else if paginator.next(ref) == target, let c = handle.controller {
             c.turn(+1)
         } else {
@@ -1071,7 +1240,13 @@ struct NovelReaderView: View {
         save()
     }
 
-    private func save() { store.record(book, chapter: ref.chapter, offset: offsetInChapter) }
+    private func save(force: Bool = false) {
+        let off = isScrollMode ? 0 : offsetInChapter
+        if !force, lastSavedChapter == ref.chapter, abs(lastSavedOffset - off) < 200 { return }
+        lastSavedChapter = ref.chapter
+        lastSavedOffset = off
+        store.record(book, chapter: ref.chapter, offset: off)
+    }
 }
 
 

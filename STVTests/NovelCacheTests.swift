@@ -161,4 +161,74 @@ import XCTest
         XCTAssertEqual(store.chapterText(book,1),"chapter1\n1:chapter1:"+toc[2].url)
     }
 
+    func testLargeWebBookChapterAccessAndScrollLookupAvoidsBulkMigrationAndNetworkStorm() throws {
+        let store = NovelStore.shared
+        let item = LegadoSearchItem(name: "长篇目录测试", author: "测试", kind: "", intro: "", cover: "", latest: "", bookURL: "https://large.test/" + UUID().uuidString, sourceURL: "https://source.large.test", sourceName: "large")
+        let toc = (0..<3000).map { LegadoChapter(title: "第\($0 + 1)章 测试", url: "https://large.test/ch/\($0)") }
+        let book = store.addWeb(item, info: nil, toc: toc)
+        defer { store.remove(book) }
+
+        let start = Date()
+        XCTAssertFalse(store.isCached(book, 2499))
+        XCTAssertEqual(store.chapterText(book, 2499), "")
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertLessThan(elapsed, 0.25, "first lookup on a 3000-chapter web book must not scan all chapters")
+
+        let paginator = NovelPaginator(book: book)
+        paginator.configure(NovelPageStyle(
+            size: CGSize(width: 340, height: 640), fontSize: 18, lineSpacing: 0.5, indent: true, fontID: "system",
+            text: .black, secondary: .gray, background: .white, highlight: .green
+        ))
+        // Scroll mode lookup with triggerLoad=false must never fire network requests or paginate.
+        let scrollAttr = paginator.scrollChapter(2499, triggerLoad: false)
+        XCTAssertTrue(scrollAttr.string.contains("第2500章 测试"))
+        XCTAssertFalse(NovelWebLoader.shared.isLoading(book, 2499))
+        XCTAssertFalse(paginator.hasCachedImages(2499))
+    }
+
+    func testNovelPagerControllerTocJumpStaysResponsiveAcrossAllTurnStyles() throws {
+        let store = NovelStore.shared
+        var fullText = ""
+        var chapters: [NovelChapter] = []
+        for i in 0..<200 {
+            let start = (fullText as NSString).length
+            let body = "第\(i + 1)章 跳转验证\n" + String(repeating: "这是第\(i + 1)章的正文段落内容，用于验证目录跳转后页面正常渲染且翻页不卡死。\n", count: 18)
+            fullText += body
+            let end = (fullText as NSString).length
+            chapters.append(NovelChapter(title: "第\(i + 1)章 跳转验证", start: start, end: end))
+        }
+        let parsed = NovelParsed(title: "跳转回归书", author: "QA", text: fullText, chapters: chapters, cover: nil)
+        let book = try store.add(parsed, format: "txt")
+        defer { store.remove(book) }
+
+        let paginator = NovelPaginator(book: book)
+        paginator.configure(NovelPageStyle(
+            size: CGSize(width: 350, height: 660), fontSize: 18, lineSpacing: 0.5, indent: true, fontID: "system",
+            text: .black, secondary: .gray, background: .white, highlight: .green
+        ))
+        let vc = NovelPagerController(paginator: paginator, start: NovelPageRef(chapter: 0, index: 0))
+        vc.insets = UIEdgeInsets(top: 50, left: 20, bottom: 34, right: 20)
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.rootViewController = vc
+        window.makeKeyAndVisible()
+        vc.view.layoutIfNeeded()
+
+        for style in [NovelTurnStyle.slide, .curl, .cover, .none] {
+            vc.setStyle(style)
+            vc.show(NovelPageRef(chapter: 150, index: 0))
+            vc.view.layoutIfNeeded()
+            XCTAssertEqual(vc.current, NovelPageRef(chapter: 150, index: 0), "style \(style) failed to jump to ch 150")
+            XCTAssertFalse(vc.view.subviews.isEmpty, "style \(style) rendered empty subviews after jump")
+            XCTAssertEqual(vc.view.subviews.first?.frame, vc.view.bounds, "style \(style) frame mismatch after jump")
+            vc.turn(+1)
+        }
+    }
+
+    func testPaginateGuardsEdgeSizesWithoutHanging() {
+        let attr = NovelLayout.attributed("第一章\n正文内容测试", title: "第一章", size: 18, lineSpacing: 0.5, serif: false, color: .black)
+        XCTAssertEqual(NovelLayout.paginate(attr, size: CGSize(width: 10, height: 10)).count, 1)
+        XCTAssertEqual(NovelLayout.paginate(NSAttributedString(), size: CGSize(width: 320, height: 600)).count, 1)
+        XCTAssertGreaterThanOrEqual(NovelLayout.paginate(attr, size: CGSize(width: 320, height: 600)).count, 1)
+    }
+
 }

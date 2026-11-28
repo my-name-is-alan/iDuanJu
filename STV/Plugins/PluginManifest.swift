@@ -4,13 +4,13 @@ import CryptoKit
 /// idj1 plugin manifest (see docs/plugins/SPEC_ZH.md). Only the idj1 format is accepted — there is no
 /// FongMi/CatVod compatibility mode.
 enum PluginType: String, Codable, CaseIterable, Hashable {
-    case video, shortdrama, comic, live
-    var label: String { switch self { case .video: "长视频"; case .shortdrama: "短剧"; case .comic: "漫画"; case .live: "直播" } }
+    case video, shortdrama, comic, live, music
+    var label: String { switch self { case .video: "长视频"; case .shortdrama: "短剧"; case .comic: "漫画"; case .live: "直播"; case .music: "音乐" } }
     var requiredCapabilities: [String] {
         switch self {
         case .video, .shortdrama: ["detail", "play"]
         case .comic: ["detail", "pages"]
-        case .live: ["play"]
+        case .live, .music: ["play"]
         }
     }
 }

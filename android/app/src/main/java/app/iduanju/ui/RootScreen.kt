@@ -4,6 +4,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
@@ -12,6 +13,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LiveTv
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Icon
@@ -20,6 +22,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import app.iduanju.ui.components.YMTabGlyph
+import app.iduanju.ui.components.YMTabIcon
+import app.iduanju.ui.components.ymDockSurface
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -63,8 +68,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
-/** The four tab pages: they cross-fade, everything else is pushed. */
-private val RootRoutes = setOf("home", "tvbox", "category", "profile")
+/** The root tab pages: they cross-fade, everything else is pushed. */
+private val RootRoutes = setOf("home", "tvbox", "category", "music", "profile")
 
 /** Lets deep rows (继续观看 · 全部) open a route without threading callbacks through every page. */
 val LocalNavigate = androidx.compose.runtime.staticCompositionLocalOf<(String) -> Unit> { {} }
@@ -88,7 +93,10 @@ fun RootScreen(initialRoute: String? = null) {
     }
     DisposableEffect(lifecycleOwner, webdav) {
         val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
-            if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) {
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_START) {
+                app.iduanju.music.AppAudioArbiter.appInForeground = true
+            } else if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) {
+                app.iduanju.music.AppAudioArbiter.appInForeground = false
                 rootScope.launch { webdav.autoSyncIfNeeded() }
             }
         }
@@ -100,18 +108,28 @@ fun RootScreen(initialRoute: String? = null) {
         kotlinx.coroutines.delay(1_500)
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { app.iduanju.ui.player.PlayerWarmup.run() }
     }
+    val showMusicTab = app.iduanju.IdjApp.instance.settings.showMusicTab
+    val tabRoutes = remember(showMusicTab) {
+        buildList {
+            add("home"); add("tvbox"); add("category")
+            if (showMusicTab) add("music")
+            add("profile")
+        }
+    }
     var tab by remember { mutableIntStateOf(0) }
     var novelImmersive by remember { mutableStateOf(false) }
     val back = nav.currentBackStackEntryAsState().value
     val route = back?.destination?.route ?: "home"
-    val activeTab = when (route) {
-        "home" -> 0
-        "tvbox" -> 1
-        "category" -> 2
-        "profile" -> 3
-        else -> tab
-    }
+    val activeTab = tabRoutes.indexOf(route).takeIf { it >= 0 } ?: tab.coerceIn(0, (tabRoutes.size - 1).coerceAtLeast(0))
     LaunchedEffect(activeTab) { tab = activeTab }
+    LaunchedEffect(showMusicTab, route) {
+        if (!showMusicTab && route == "music") {
+            nav.navigate("home") {
+                popUpTo(nav.graph.id) { inclusive = true }
+                launchSingleTop = true
+            }
+        }
+    }
     val atRoot = route in RootRoutes
     /** Backdrop for the floating liquid-glass navigation bar: everything the NavHost draws. */
     val bgColor = IdjThemeColors.bg
@@ -130,51 +148,15 @@ fun RootScreen(initialRoute: String? = null) {
             )
         }
         val showChromeNav = atRoot && !(route == "home" && novelImmersive)
-        var dockHidden by remember { mutableStateOf(false) }
-        val dockRestoreJob = remember { arrayOfNulls<kotlinx.coroutines.Job>(1) }
-        LaunchedEffect(route, showChromeNav) {
-            dockRestoreJob[0]?.cancel()
-            dockHidden = false
-        }
-        val dockScroll = remember(rootScope) {
-            object : androidx.compose.ui.input.nestedscroll.NestedScrollConnection {
-                override fun onPostScroll(
-                    consumed: androidx.compose.ui.geometry.Offset,
-                    available: androidx.compose.ui.geometry.Offset,
-                    source: androidx.compose.ui.input.nestedscroll.NestedScrollSource,
-                ): androidx.compose.ui.geometry.Offset {
-                    if (consumed.y < -10f) {
-                        if (!dockHidden) dockHidden = true
-                        dockRestoreJob[0]?.cancel()
-                    } else if (consumed.y > 10f) {
-                        dockRestoreJob[0]?.cancel()
-                        if (dockHidden) dockHidden = false
-                    }
-                    return androidx.compose.ui.geometry.Offset.Zero
-                }
-
-                override suspend fun onPostFling(
-                    consumed: androidx.compose.ui.unit.Velocity,
-                    available: androidx.compose.ui.unit.Velocity,
-                ): androidx.compose.ui.unit.Velocity {
-                    if (dockHidden) {
-                        dockRestoreJob[0]?.cancel()
-                        dockRestoreJob[0] = rootScope.launch {
-                            kotlinx.coroutines.delay(650)
-                            dockHidden = false
-                        }
-                    }
-                    return androidx.compose.ui.unit.Velocity.Zero
-                }
+        val navItems = buildList<Pair<String, @Composable (Boolean) -> Unit>> {
+            add("首页" to { on -> YMTabIcon(YMTabGlyph.HOME, size = 21.dp, active = on) })
+            add("TVBox" to { on -> YMTabIcon(YMTabGlyph.TVBOX, size = 21.dp, active = on) })
+            add("找剧" to { on -> YMTabIcon(YMTabGlyph.DISCOVER, size = 21.dp, active = on) })
+            if (showMusicTab) {
+                add("音乐" to { on -> YMTabIcon(YMTabGlyph.MUSIC, size = 21.dp, active = on) })
             }
+            add("我的" to { on -> YMTabIcon(YMTabGlyph.PROFILE, size = 21.dp, active = on) })
         }
-        val navItems = listOf<Pair<String, @Composable (Boolean) -> Unit>>(
-            "首页" to { on -> Icon(Icons.Filled.Home, null, Modifier.size(20.dp), tint = if (on) IdjThemeColors.text else dockLabel()) },
-            "TVBox" to { on -> Icon(Icons.Filled.LiveTv, null, Modifier.size(20.dp), tint = if (on) IdjThemeColors.text else dockLabel()) },
-            "找剧" to { on -> Icon(Icons.Filled.GridView, null, Modifier.size(20.dp), tint = if (on) IdjThemeColors.text else dockLabel()) },
-            "我的" to { on -> Icon(Icons.Filled.Person, null, Modifier.size(20.dp), tint = if (on) IdjThemeColors.text else dockLabel()) },
-        )
-        val tabRoutes = listOf("home", "tvbox", "category", "profile")
         val goHome: () -> Unit = {
             if (nav.currentBackStackEntry?.destination?.route != "home" && !nav.popBackStack("home", inclusive = false)) {
                 nav.navigate("home") {
@@ -196,14 +178,15 @@ fun RootScreen(initialRoute: String? = null) {
                     restoreState = true
                 }
             }
-            tab = when (nav.currentBackStackEntry?.destination?.route) {
-                "home" -> 0; "tvbox" -> 1; "category" -> 2; "profile" -> 3; else -> i
-            }
+            tab = tabRoutes.indexOf(nav.currentBackStackEntry?.destination?.route).takeIf { it >= 0 } ?: i
         }
 
         // "home/<source>" (我的 → Telegram 频道 / 漫画) switches to the 首页 tab and shows that source page.
         val navigate: (String) -> Unit = { r ->
-            if (r.startsWith("home/")) {
+            if (r == "home/music") {
+                val musicIdx = tabRoutes.indexOf("music")
+                if (musicIdx >= 0) onSelectTab(musicIdx) else nav.navigate("music")
+            } else if (r.startsWith("home/")) {
                 app.iduanju.ui.home.HomeJump.label = mapOf("channels" to "频道", "manga" to "漫画")[r.removePrefix("home/")]
                 tab = 0
                 goHome()
@@ -215,7 +198,7 @@ fun RootScreen(initialRoute: String? = null) {
             // Root backdrop is only active while the NavHost is recorded into it (chrome nav visible).
             LocalRootBackdrop provides (if (showChromeNav) backdrop else null),
         ) {
-            Row(Modifier.fillMaxSize().background(IdjThemeColors.bg).then(if (showChromeNav && !metrics.useRail) Modifier.nestedScroll(dockScroll) else Modifier)) {
+            Row(Modifier.fillMaxSize().background(if (route == "music") app.iduanju.music.YMColors.base else IdjThemeColors.bg)) {
                 if (showChromeNav && metrics.useRail) {
                     GlassNavigationRail(
                         selected = tab,
@@ -223,7 +206,7 @@ fun RootScreen(initialRoute: String? = null) {
                         onSelect = onSelectTab,
                         backdrop = LocalRootBackdrop.current,
                         onSearch = { nav.navigate("search") },
-                        searchIcon = { on -> Icon(Icons.Filled.Search, null, Modifier.size(20.dp), tint = if (on) IdjThemeColors.accent else IdjThemeColors.text) },
+                        searchIcon = { on -> YMTabIcon(YMTabGlyph.SEARCH, size = 20.dp, active = on) },
                     )
                 }
                 // NavHost content is drawn INSIDE layerBackdrop(backdrop): never hand it the root backdrop (feedback loop).
@@ -296,6 +279,62 @@ fun RootScreen(initialRoute: String? = null) {
                         composable("sources") { app.iduanju.ui.profile.SourcesScreen(onBack = { nav.popBackStack() }) }
                         composable("plugins") { app.iduanju.ui.profile.PluginsScreen(onBack = { nav.popBackStack() }) }
                         composable("novel") { app.iduanju.novel.NovelScreen(onBack = { nav.popBackStack() }) }
+                        composable("music") { app.iduanju.music.MusicHomePage(isRootTab = true, onBack = { nav.popBackStack() }) }
+                        composable("music/daily") { app.iduanju.music.MusicDailyRecScreen(onBack = { nav.popBackStack() }) }
+                        composable("music/settings") { app.iduanju.music.MusicSettingsScreen(onBack = { nav.popBackStack() }) }
+                        composable(
+                            "music/artist?name={name}&id={id}&src={src}&cover={cover}",
+                            arguments = listOf("name", "id", "src", "cover").map { navArgument(it) { defaultValue = "" } },
+                        ) { e ->
+                            val args = requireNotNull(e.arguments)
+                            app.iduanju.music.MusicArtistDetailScreen(
+                                name = args.getString("name").orEmpty(),
+                                artistId = args.getString("id")?.takeIf { it.isNotBlank() },
+                                sourceId = args.getString("src").orEmpty().ifBlank { "netease" },
+                                coverHint = args.getString("cover").orEmpty(),
+                                onBack = { nav.popBackStack() },
+                            )
+                        }
+                        composable(
+                            "music/album?name={name}&id={id}&artist={artist}&aid={aid}&src={src}&cover={cover}",
+                            arguments = listOf("name", "id", "artist", "aid", "src", "cover").map { navArgument(it) { defaultValue = "" } },
+                        ) { e ->
+                            val args = requireNotNull(e.arguments)
+                            app.iduanju.music.MusicAlbumDetailScreen(
+                                name = args.getString("name").orEmpty(),
+                                albumId = args.getString("id")?.takeIf { it.isNotBlank() },
+                                artist = args.getString("artist").orEmpty(),
+                                artistId = args.getString("aid")?.takeIf { it.isNotBlank() },
+                                sourceId = args.getString("src").orEmpty().ifBlank { "netease" },
+                                coverHint = args.getString("cover").orEmpty(),
+                                onBack = { nav.popBackStack() },
+                            )
+                        }
+                        composable("music/chart/{id}") { e ->
+                            val chartId = android.net.Uri.decode(e.arguments?.getString("id").orEmpty())
+                            val chart = app.iduanju.music.MusicProviderHub.findCachedChart(chartId)
+                            app.iduanju.music.MusicTrackListScreen(
+                                title = chart?.name ?: "榜单详情",
+                                subtitle = chart?.let { "${it.updatedLabel} · ${it.tracks.size} 首" } ?: "实时榜单",
+                                tracks = chart?.tracks.orEmpty(),
+                                canClone = chart != null,
+                                onBack = { nav.popBackStack() },
+                            )
+                        }
+                        composable("music/playlist/{id}") { e ->
+                            val plId = android.net.Uri.decode(e.arguments?.getString("id").orEmpty())
+                            val pl = app.iduanju.IdjApp.instance.musicStore.findPlaylistById(plId)
+                            app.iduanju.music.MusicTrackListScreen(
+                                title = pl?.name ?: "歌单详情",
+                                subtitle = pl?.subtitle ?: "歌单",
+                                tracks = pl?.tracks.orEmpty(),
+                                canClone = pl?.isCloud == true,
+                                remoteSource = pl?.source,
+                                remotePlaylistId = pl?.remoteId,
+                                playlistId = pl?.id,
+                                onBack = { nav.popBackStack() },
+                            )
+                        }
                         composable("licenses") { app.iduanju.ui.profile.LicensesScreen(onBack = { nav.popBackStack() }) }
                         composable("actorRank") { app.iduanju.ui.profile.ActorRankScreen(onBack = { nav.popBackStack() }) }
                         composable("actor/{id}?name={name}&avatar={avatar}&role={role}&intro={intro}",
@@ -349,22 +388,53 @@ fun RootScreen(initialRoute: String? = null) {
                 }
             }
         }
-        androidx.compose.animation.AnimatedVisibility(
-            visible = showChromeNav && !metrics.useRail && !dockHidden,
-            modifier = Modifier.align(Alignment.BottomCenter),
-            enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(180)) +
-                androidx.compose.animation.slideInVertically(androidx.compose.animation.core.tween(220)) { it + 48 },
-            exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(140)) +
-                androidx.compose.animation.slideOutVertically(androidx.compose.animation.core.tween(180)) { it + 48 },
+        val musicPlayer = app.iduanju.IdjApp.instance.musicPlayer
+        val showGlobalMiniBar = musicPlayer.shouldShowGlobalMiniBar && !(route == "home" && novelImmersive)
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(bottom = 6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            SwipeableGlassTabBar(
-                selected = tab,
-                items = navItems,
-                onSelect = onSelectTab,
-                backdrop = backdrop,
-                modifier = Modifier
-                    .windowInsetsPadding(WindowInsets.navigationBars)
-                    .padding(bottom = 6.dp),
+            androidx.compose.animation.AnimatedVisibility(
+                visible = !metrics.useRail && showGlobalMiniBar,
+                enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(180)) +
+                    androidx.compose.animation.slideInVertically(androidx.compose.animation.core.tween(220)) { it + 32 },
+                exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(140)) +
+                    androidx.compose.animation.slideOutVertically(androidx.compose.animation.core.tween(180)) { it + 32 },
+            ) {
+                app.iduanju.music.MusicMiniPlayerBar(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp),
+                )
+            }
+            androidx.compose.animation.AnimatedVisibility(
+                visible = showChromeNav && !metrics.useRail,
+                enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(180)) +
+                    androidx.compose.animation.slideInVertically(androidx.compose.animation.core.tween(220)) { it + 48 },
+                exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(140)) +
+                    androidx.compose.animation.slideOutVertically(androidx.compose.animation.core.tween(180)) { it + 48 },
+            ) {
+                SwipeableGlassTabBar(
+                    selected = tab,
+                    items = navItems,
+                    onSelect = onSelectTab,
+                    backdrop = backdrop,
+                )
+            }
+        }
+        androidx.compose.animation.AnimatedVisibility(
+            visible = metrics.useRail && showGlobalMiniBar,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .navigationBarsPadding()
+                .padding(end = 20.dp, bottom = 16.dp),
+            enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(180)),
+            exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(140)),
+        ) {
+            app.iduanju.music.MusicMiniPlayerBar(
+                modifier = Modifier.widthIn(max = 360.dp).fillMaxWidth(),
             )
         }
         GlassToastHost(
@@ -372,6 +442,12 @@ fun RootScreen(initialRoute: String? = null) {
                 .padding(start = 20.dp, end = 20.dp, bottom = if (showChromeNav && !metrics.useRail) 82.dp else 28.dp),
             backdrop = if (showChromeNav) backdrop else null,
         )
+        androidx.compose.runtime.CompositionLocalProvider(
+            LocalNavigate provides navigate,
+            LocalLayoutMetrics provides metrics,
+        ) {
+            app.iduanju.music.MusicNowPlayingOverlay()
+        }
         app.iduanju.update.UpdateDialog(updater)
         app.iduanju.ui.components.SiteVerifyHostOverlay()
     }
@@ -423,11 +499,11 @@ private fun SwipeableGlassTabBar(
     Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         Box(
             Modifier
-                .widthIn(max = 380.dp)
+                .widthIn(max = 420.dp)
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp)
+                .padding(horizontal = 14.dp)
                 .height(58.dp)
-                .glassSurface(shape = DockPillShape, backdrop = backdrop, shadowRadius = 18.dp, veil = dockVeil())
+                .ymDockSurface(DockPillShape, shadowElevation = 18.dp)
                 .padding(5.dp),
             contentAlignment = Alignment.Center,
         ) {
@@ -451,10 +527,8 @@ private fun SwipeableGlassTabBar(
                             scaleX = indicatorScale
                             scaleY = indicatorScale
                         }
-                        .then(
-                            if (liquid) Modifier.glassPill(DockPillShape, selected = true, neutralSelected = true)
-                            else Modifier.clip(DockPillShape).background(if (c.dark) Color.White.copy(alpha = 0.14f) else Color.Black.copy(alpha = 0.08f)),
-                        ),
+                        .clip(DockPillShape)
+                        .background(if (c.dark) Color.White.copy(alpha = 0.11f) else Color.Black.copy(alpha = 0.08f)),
                 )
 
                 Row(
@@ -511,9 +585,9 @@ private fun SwipeableGlassTabBar(
                                 Spacer(Modifier.height(2.dp))
                                 Text(
                                     label,
-                                    color = if (on) c.text else dockLabel(),
-                                    fontSize = 11.sp,
-                                    fontWeight = if (on) FontWeight.SemiBold else FontWeight.Medium,
+                                    color = if (on) c.accent else c.text.copy(alpha = 0.62f),
+                                    fontSize = 10.sp,
+                                    fontWeight = if (on) FontWeight.Bold else FontWeight.Medium,
                                     maxLines = 1,
                                 )
                             }

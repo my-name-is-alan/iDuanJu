@@ -102,7 +102,10 @@ private struct DSCardGround: ViewModifier {
                 shape.fill(STVTheme.card)
             }
             if !onGlass || contrast == .increased {
-                shape.strokeBorder(contrast == .increased ? STVTheme.secondary.opacity(0.5) : STVTheme.cardBorder, lineWidth: 1)
+                shape.strokeBorder(
+                    contrast == .increased ? STVTheme.secondary.opacity(0.5) : STVTheme.cardBorder,
+                    style: StrokeStyle(lineWidth: 1.15, lineCap: .round, dash: [6, 4])
+                )
             }
         }
     }
@@ -221,6 +224,7 @@ struct UnderlineTabLabel: View {
     var ink: Color = STVTheme.text
     var inkOff: Color = STVTheme.secondary
     let ns: Namespace.ID
+    @State private var drawn: CGFloat = 1
     var body: some View {
         let activeSize: CGFloat = small ? 18 : 24
         let idleSize: CGFloat = small ? 16 : 17
@@ -256,16 +260,32 @@ struct UnderlineTabLabel: View {
                     .opacity(on ? 0 : 1)
             }
             .accessibilityLabel(title)
-            .padding(.bottom, small ? 0 : 6)
+            .padding(.bottom, small ? 0 : 7)
+            .background {
+                if on && !small {
+                    YMScribbleCircle(seed: UInt64(abs(title.hashValue) % 89 + 11))
+                        .trim(from: 0, to: drawn)
+                        .stroke(STVTheme.accent.opacity(0.32), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                        .padding(.horizontal, -9)
+                        .padding(.top, -3)
+                        .padding(.bottom, 1)
+                }
+            }
             .overlay(alignment: align) {
                 if on {
-                    Capsule().fill(STVTheme.accent)
-                        .frame(width: small ? 22 : 26, height: small ? 3 : 4)
-                        .offset(x: small ? 0 : 1, y: small ? 8 : 0)
-                        .matchedGeometryEffect(id: "underline", in: ns)
+                    YMScribbleUnderline()
+                        .trim(from: 0, to: drawn)
+                        .stroke(STVTheme.accent, style: StrokeStyle(lineWidth: small ? 2.6 : 3.4, lineCap: .round))
+                        .frame(width: small ? 26 : 36, height: 6)
+                        .offset(x: small ? 0 : 1, y: small ? 8 : 1)
                 }
             }
             .contentShape(Rectangle())
+            .compatOnChange(of: on) { active in
+                guard active else { drawn = 1; return }
+                drawn = 0
+                withAnimation(.easeOut(duration: 0.46)) { drawn = 1 }
+            }
     }
 }
 
@@ -294,10 +314,10 @@ struct SegmentedTabs<T: Hashable>: View {
                     withAnimation(DS.motion(DS.select, reduce: reduceMotion)) { selection = it }
                 } label: {
                     Text(label(it))
-                        .font(.system(size: 14, weight: on ? .semibold : .medium))
-                        .foregroundStyle(on ? STVTheme.text : STVTheme.secondary)
+                        .font(.system(size: 13.5, weight: on ? .bold : .medium))
+                        .foregroundStyle(on ? STVTheme.bg : STVTheme.secondary)
                         .lineLimit(1).minimumScaleFactor(0.75)
-                        .padding(.horizontal, 4)
+                        .padding(.horizontal, 6)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .contentShape(Rectangle())
                 }
@@ -307,26 +327,25 @@ struct SegmentedTabs<T: Hashable>: View {
             }
         }
         .background { thumb }
-        .padding(3)
-        .frame(height: 42)
+        .padding(3.5)
+        .frame(height: 40)
         .background(STVTheme.glass, in: Capsule())
-        .overlay { if contrast == .increased { Capsule().strokeBorder(STVTheme.secondary.opacity(0.5), lineWidth: 1) } }
+        .overlay(
+            Capsule().strokeBorder(
+                contrast == .increased ? STVTheme.secondary.opacity(0.5) : STVTheme.glassBorder,
+                style: StrokeStyle(lineWidth: 1.0, lineCap: .round, dash: [5, 3.5])
+            )
+        )
     }
 
     private var thumb: some View {
         GeometryReader { g in
             let w = g.size.width / CGFloat(max(items.count, 1))
-            Group {
-                if onGlass {
-                    Capsule().fill(STVTheme.thumb.shadow(.drop(color: STVTheme.shadowThumb, radius: 3, y: 1.5)))
-                } else if #available(iOS 26.0, *) {
-                    Color.clear.liquidGlassCapsule(interactive: true)
-                } else {
-                    Capsule().fill(STVTheme.thumb.shadow(.drop(color: STVTheme.shadowThumb, radius: 3, y: 1.5)))
-                }
-            }
-            .frame(width: w)
-            .offset(x: w * CGFloat(index))
+            Capsule()
+                .fill(STVTheme.text)
+                .shadow(color: STVTheme.shadowThumb, radius: 3, y: 1.5)
+                .frame(width: w)
+                .offset(x: w * CGFloat(index))
         }
         .allowsHitTesting(false)
     }
@@ -358,21 +377,21 @@ private struct ToneChipBody<L: View>: View {
     @Environment(\.colorSchemeContrast) private var contrast
 
     private var fill: Color {
-        on ? (neutral ? STVTheme.thumb : STVTheme.accentSoft) : (pressed ? STVTheme.glassBorder : STVTheme.glass)
+        on ? STVTheme.text : (pressed ? STVTheme.glassBorder : STVTheme.glass)
     }
     private var rim: Color {
-        if on && !neutral { return STVTheme.accentLine }
-        return contrast == .increased ? STVTheme.secondary.opacity(0.5) : .clear
+        if on { return neutral ? .clear : STVTheme.accent.opacity(0.55) }
+        return contrast == .increased ? STVTheme.secondary.opacity(0.5) : STVTheme.hairline
     }
 
     var body: some View {
         label
-            .dsFont(small ? 13 : 14, on ? .semibold : .regular, relativeTo: .subheadline)
-            .foregroundStyle(on ? (neutral ? STVTheme.text : STVTheme.accent) : (pressed ? STVTheme.text : STVTheme.secondary))
+            .dsFont(small ? 12.5 : 13.5, on ? .bold : .medium, relativeTo: .subheadline)
+            .foregroundStyle(on ? STVTheme.bg : (pressed ? STVTheme.text : STVTheme.secondary))
             .lineLimit(1)
             .padding(.horizontal, small ? 12 : 14)
             .frame(minHeight: small ? 28 : 32)
-            .modifier(Ground(glass: floating && !onGlass, on: on, neutral: neutral, fill: fill, rim: rim))
+            .modifier(Ground(glass: floating && !onGlass && !on, on: on, neutral: neutral, fill: fill, rim: rim))
             .contentShape(Capsule())
             .scaleEffect(pressed ? 0.96 : 1)
             .opacity(enabled ? 1 : 0.38)
@@ -388,7 +407,11 @@ private struct ToneChipBody<L: View>: View {
             } else {
                 content.background {
                     Capsule().fill(on && neutral ? AnyShapeStyle(fill.shadow(.drop(color: STVTheme.shadowThumb, radius: 3, y: 1.5))) : AnyShapeStyle(fill))
-                    Capsule().strokeBorder(rim, lineWidth: 1)
+                    if on {
+                        Capsule().strokeBorder(rim, lineWidth: 1.0)
+                    } else {
+                        Capsule().strokeBorder(rim, style: StrokeStyle(lineWidth: 1.0, lineCap: .round, dash: [4.5, 3.5]))
+                    }
                 }
             }
         }
@@ -509,10 +532,10 @@ struct PillButtonLabel: View {
     var body: some View {
         let h = height ?? (small ? 32 : 48)
         let label = HStack(spacing: 6) {
-            if let icon { Image(systemName: icon).font(.system(size: small ? 10 : 12, weight: .bold)) }
-            Text(title).font(.system(size: small ? 13 : 16, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.8)
+            if let icon { Image(systemName: icon).font(.system(size: small ? 10.5 : 12.5, weight: .bold)) }
+            Text(title).font(.system(size: small ? 13 : 15.5, weight: .bold)).lineLimit(1).minimumScaleFactor(0.8)
         }
-        .foregroundStyle(tone == .accent ? STVTheme.onAccent : tone == .ink ? STVTheme.bg : Color(red: 0.067, green: 0.075, blue: 0.090))
+        .foregroundStyle(tone == .accent ? STVTheme.onAccent : tone == .ink ? STVTheme.bg : Color(red: 0.039, green: 0.039, blue: 0.047))
         .padding(.horizontal, small ? 14 : 22)
         .frame(maxWidth: expand ? .infinity : nil)
         .frame(height: h)
@@ -576,20 +599,59 @@ struct DSNavBar<Leading: View, Trailing: View>: View {
     @ViewBuilder var leading: Leading
     @ViewBuilder var trailing: Trailing
     var body: some View {
-        ZStack {
+        DSNavBarLayout {
             Text(title).dsFont(17, .semibold, relativeTo: .headline).foregroundStyle(STVTheme.text).lineLimit(1)
-                .padding(.horizontal, 104)
+                .truncationMode(.tail)
                 .accessibilityAddTraits(.isHeader)
                 .accessibilityIdentifier("nav.title")
-            HStack(spacing: 8) {
-                leading
-                Spacer(minLength: 0)
-                LiquidGlassGroup(spacing: 8) { HStack(spacing: 8) { trailing } }
-            }
+            HStack(spacing: 8) { leading }
+            LiquidGlassGroup(spacing: 8) { HStack(spacing: 8) { trailing } }
         }
         .frame(height: 44)
         .padding(.horizontal, 16).padding(.top, 2).padding(.bottom, 8)
         .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+    }
+}
+
+/// Centers the title on screen whenever leading & trailing items leave enough room; if trailing actions are wide
+/// (e.g. a 4-icon glass capsule), centers the title within the open gap between leading and trailing so it never overlaps.
+private struct DSNavBarLayout: Layout {
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        CGSize(width: proposal.width ?? 320, height: proposal.height ?? 44)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard subviews.count == 3 else { return }
+        let titleView = subviews[0]
+        let leadingView = subviews[1]
+        let trailingView = subviews[2]
+
+        let leadSize = leadingView.sizeThatFits(.unspecified)
+        let trailSize = trailingView.sizeThatFits(.unspecified)
+
+        leadingView.place(at: CGPoint(x: bounds.minX, y: bounds.midY), anchor: .leading, proposal: ProposedViewSize(leadSize))
+        trailingView.place(at: CGPoint(x: bounds.maxX, y: bounds.midY), anchor: .trailing, proposal: ProposedViewSize(trailSize))
+
+        let gap: CGFloat = 10
+        let leftLimit = bounds.minX + (leadSize.width > 0 ? leadSize.width + gap : 0)
+        let rightLimit = bounds.maxX - (trailSize.width > 0 ? trailSize.width + gap : 0)
+        let availW = max(0, rightLimit - leftLimit)
+        guard availW > 0 else { return }
+
+        let titleSize = titleView.sizeThatFits(ProposedViewSize(width: availW, height: bounds.height))
+        let fittedW = min(titleSize.width, availW)
+        let screenCenteredX = bounds.midX - fittedW / 2
+        let titleX: CGFloat
+        if screenCenteredX >= leftLimit && (screenCenteredX + fittedW) <= rightLimit {
+            titleX = screenCenteredX
+        } else {
+            titleX = leftLimit + (availW - fittedW) / 2
+        }
+        titleView.place(
+            at: CGPoint(x: titleX, y: bounds.midY),
+            anchor: .leading,
+            proposal: ProposedViewSize(width: fittedW, height: bounds.height)
+        )
     }
 }
 
@@ -689,8 +751,20 @@ struct DSSectionHeader<Trailing: View>: View {
     var inset: CGFloat = 16
     @ViewBuilder var trailing: Trailing
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(title).dsFont(19, .bold, relativeTo: .title3).foregroundStyle(STVTheme.text).accessibilityAddTraits(.isHeader)
+        HStack(alignment: .center, spacing: 8) {
+            HStack(spacing: 5) {
+                YMDoodleSparkle()
+                    .fill(STVTheme.accent)
+                    .frame(width: 11, height: 11)
+                    .rotationEffect(.degrees(-10))
+                Text(title).dsFont(19, .heavy, relativeTo: .title3).foregroundStyle(STVTheme.text).accessibilityAddTraits(.isHeader)
+                    .overlay(alignment: .bottomLeading) {
+                        YMScribbleUnderline()
+                            .stroke(STVTheme.accent.opacity(0.65), style: StrokeStyle(lineWidth: 2.2, lineCap: .round))
+                            .frame(width: 24, height: 4)
+                            .offset(y: 4)
+                    }
+            }
             if let note { Text(note).dsFont(13, relativeTo: .footnote).foregroundStyle(STVTheme.secondary) }
             Spacer(minLength: 0)
             trailing
@@ -759,7 +833,8 @@ struct DSHeroTag: View {
         }
         .foregroundStyle(STVTheme.accent)
         .padding(.horizontal, 9).frame(height: 24)
-        .background(STVTheme.bg.opacity(0.82), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(STVTheme.bg.opacity(0.84), in: Capsule())
+        .overlay(Capsule().strokeBorder(STVTheme.accent.opacity(0.45), style: StrokeStyle(lineWidth: 0.9, lineCap: .round, dash: [3.5, 2.5])))
     }
 }
 
@@ -803,28 +878,56 @@ struct IconWell: View {
     var tint: Color = STVTheme.accent
     var ground: Color = STVTheme.accentSoft
     var body: some View {
-        Image(systemName: systemName).font(.system(size: size * 0.5, weight: .medium)).foregroundStyle(tint)
+        Image(systemName: systemName).font(.system(size: size * 0.46, weight: .semibold)).foregroundStyle(tint)
             .frame(width: size, height: size)
             .background(ground, in: RoundedRectangle(cornerRadius: corner ?? size / 2, style: .continuous))
+            .overlay {
+                if corner == nil {
+                    YMScribbleCircle(seed: UInt64(abs(systemName.hashValue) % 83 + 5))
+                        .stroke(tint.opacity(0.55), style: StrokeStyle(lineWidth: 1.15, lineCap: .round))
+                        .padding(-1.5)
+                }
+            }
             .accessibilityHidden(true)
     }
 }
 
 // MARK: - Posters
 
-/// Rank numeral on a poster (`.pnum`): italic 900, white with a 2 pt medal-coloured offset shadow.
+/// Yimeng hand-drawn rank badge on posters: tilted gold crown for #1, scribble-circled medal for #2/#3, clean pill for #4+.
 struct PosterRankNumeral: View {
     let rank: Int
     var body: some View {
-        let shadow: Color = switch rank {
-        case 1: Color(red: 1, green: 0.78, blue: 0.25)
-        case 2: Color(red: 0.68, green: 0.73, blue: 0.84)
-        case 3: Color(red: 0.86, green: 0.55, blue: 0.32)
-        default: .black
+        let accent: Color = switch rank {
+        case 1: YMTheme.gold
+        case 2: YMTheme.silver
+        case 3: YMTheme.bronze
+        default: Color.white.opacity(0.85)
         }
-        Text("\(rank)").font(.system(size: 36, weight: .black)).italic()
-            .foregroundStyle(.white).shadow(color: shadow, radius: 0, x: 2, y: 2)
-            .padding(.leading, 7).offset(y: -3)
+        VStack(spacing: -2) {
+            if rank == 1 {
+                YMCrownScribble()
+                    .fill(YMTheme.gold)
+                    .frame(width: 17, height: 10)
+                    .rotationEffect(.degrees(-8))
+                    .shadow(color: .black.opacity(0.55), radius: 2, y: 1)
+            }
+            ZStack {
+                Circle()
+                    .fill(Color.black.opacity(rank <= 3 ? 0.68 : 0.52))
+                if rank <= 3 {
+                    YMScribbleCircle(seed: UInt64(rank * 31 + 7))
+                        .stroke(accent, style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
+                        .padding(1)
+                }
+                Text("\(rank)")
+                    .font(.system(size: rank <= 3 ? 14 : 12.5, weight: .black, design: .rounded))
+                    .foregroundStyle(rank <= 3 ? accent : .white)
+            }
+            .frame(width: rank <= 3 ? 28 : 24, height: rank <= 3 ? 28 : 24)
+        }
+        .padding(.leading, 7)
+        .padding(.top, rank == 1 ? 5 : 7)
     }
 }
 

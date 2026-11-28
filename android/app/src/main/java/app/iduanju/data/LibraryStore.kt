@@ -28,6 +28,35 @@ data class WatchProgress(
     }
 }
 
+/** LWW tombstone metadata so deleted or cleared search history is never resurrected by backup / WebDAV merge. */
+data class SearchHistoryMeta(
+    val added: Map<String, Long> = emptyMap(),
+    val deleted: Map<String, Long> = emptyMap(),
+    val clearedAt: Long = 0L,
+) {
+    fun toJSON(): JSONObject = JSONObject().apply {
+        put("added", JSONObject().apply { added.forEach { (k, v) -> put(k, v) } })
+        put("deleted", JSONObject().apply { deleted.forEach { (k, v) -> put(k, v) } })
+        put("clearedAt", clearedAt)
+    }
+
+    companion object {
+        fun fromJSON(raw: String?): SearchHistoryMeta {
+            if (raw.isNullOrBlank()) return SearchHistoryMeta()
+            return runCatching { fromJSON(JSONObject(raw)) }.getOrDefault(SearchHistoryMeta())
+        }
+
+        fun fromJSON(o: JSONObject?): SearchHistoryMeta {
+            if (o == null) return SearchHistoryMeta()
+            val added = LinkedHashMap<String, Long>()
+            o.optJSONObject("added")?.let { a -> a.keys().forEach { k -> added[k] = a.optLong(k, 0L) } }
+            val deleted = LinkedHashMap<String, Long>()
+            o.optJSONObject("deleted")?.let { d -> d.keys().forEach { k -> deleted[k] = d.optLong(k, 0L) } }
+            return SearchHistoryMeta(added = added, deleted = deleted, clearedAt = o.optLong("clearedAt", 0L))
+        }
+    }
+}
+
 /** iOS LibraryStore: history (continue watching) + favourites + per-series playback choices. Main thread only. */
 class LibraryStore(ctx: Context) {
     private val sp = ctx.getSharedPreferences("library", Context.MODE_PRIVATE)
@@ -38,6 +67,9 @@ class LibraryStore(ctx: Context) {
     val history = mutableStateListOf<WatchProgress>()
     val favorites = mutableStateMapOf<String, Triple<String, String, Long>>()
     val searchHistory = mutableStateListOf<String>()
+    private val searchAdded = LinkedHashMap<String, Long>()
+    private val searchDeleted = LinkedHashMap<String, Long>()
+    private var searchClearedAt: Long = 0L
     private val lineChoice = LinkedHashMap<String, String>()
     private val qualityChoice = LinkedHashMap<String, String>()
 
@@ -53,6 +85,9 @@ class LibraryStore(ctx: Context) {
         lineChoice.clear()
         qualityChoice.clear()
         searchHistory.clear()
+        searchAdded.clear()
+        searchDeleted.clear()
+        searchClearedAt = 0L
         peekCache.clear()
         runCatching {
             val a = JSONArray(sp.getString("history", "[]"))
@@ -73,7 +108,18 @@ class LibraryStore(ctx: Context) {
         }
         runCatching { readMap("lineChoice", lineChoice) }
         runCatching { readMap("qualityChoice", qualityChoice) }
-        runCatching { val a = JSONArray(sp.getString("search", "[]")); for (i in 0 until a.length()) searchHistory.add(a.getString(i)) }
+        val meta = SearchHistoryMeta.fromJSON(sp.getString("searchMeta", null))
+        searchAdded.putAll(meta.added)
+        searchDeleted.putAll(meta.deleted)
+        searchClearedAt = meta.clearedAt
+        runCatching {
+            val a = JSONArray(sp.getString("search", "[]"))
+            val seen = LinkedHashSet<String>()
+            for (i in 0 until a.length()) {
+                val term = a.optString(i).trim()
+                if (term.isNotEmpty() && seen.add(term)) searchHistory.add(term)
+            }
+        }
     }
 
     private fun updatePeek(sid: String, title: String, cover: String) {
@@ -88,10 +134,66 @@ class LibraryStore(ctx: Context) {
     fun peekTitleSafe(sid: String): String = peekCache[sid]?.first.orEmpty()
     fun peekCoverSafe(sid: String): String = peekCache[sid]?.second.orEmpty()
 
-    fun addSearch(q: String) { searchHistory.remove(q); searchHistory.add(0, q); while (searchHistory.size > 20) searchHistory.removeAt(20); saveSearch() }
-    fun removeSearch(q: String) { searchHistory.remove(q); saveSearch() }
-    fun clearSearch() { searchHistory.clear(); saveSearch() }
-    private fun saveSearch() { sp.edit().putString("search", JSONArray(searchHistory.toList()).toString()).apply() }
+    fun searchHistoryMeta(): SearchHistoryMeta = SearchHistoryMeta(
+        added = searchAdded.toMap(),
+        deleted = searchDeleted.toMap(),
+        clearedAt = searchClearedAt,
+    )
+
+    fun addSearch(q: String) {
+        val term = q.trim()
+        if (term.isEmpty()) return
+        val now = System.currentTimeMillis()
+        searchHistory.remove(term)
+        searchHistory.add(0, term)
+        while (searchHistory.size > SEARCH_HISTORY_LIMIT) searchHistory.removeAt(SEARCH_HISTORY_LIMIT)
+        searchAdded[term] = now
+        searchDeleted.remove(term)
+        trimSearchMeta()
+        saveSearch()
+    }
+
+    fun removeSearch(q: String) {
+        val term = q.trim()
+        if (term.isEmpty()) return
+        val now = System.currentTimeMillis()
+        searchHistory.removeAll { it == q || it.trim() == term }
+        searchAdded.remove(q)
+        searchAdded.remove(term)
+        searchDeleted[term] = now
+        trimSearchMeta()
+        saveSearch()
+    }
+
+    fun clearSearch() {
+        val now = System.currentTimeMillis()
+        for (term in searchHistory) {
+            val t = term.trim()
+            if (t.isNotEmpty()) searchDeleted[t] = now
+        }
+        searchHistory.clear()
+        searchAdded.clear()
+        searchClearedAt = now
+        trimSearchMeta()
+        saveSearch()
+    }
+
+    private fun trimSearchMeta() {
+        val active = searchHistory.toHashSet()
+        searchAdded.keys.retainAll(active)
+        if (searchDeleted.size > MAX_SEARCH_TOMBSTONES) {
+            val keep = searchDeleted.entries.sortedByDescending { it.value }.take(MAX_SEARCH_TOMBSTONES)
+            searchDeleted.clear()
+            keep.forEach { (k, v) -> searchDeleted[k] = v }
+        }
+    }
+
+    private fun saveSearch() {
+        sp.edit()
+            .putString("search", JSONArray(searchHistory.toList()).toString())
+            .putString("searchMeta", searchHistoryMeta().toJSON().toString())
+            .apply()
+    }
 
     val continueWatching: List<WatchProgress> get() = history.sortedByDescending { it.updatedAt }
     fun progress(sid: String): WatchProgress? = history.firstOrNull { it.seriesId == sid }
@@ -132,7 +234,10 @@ class LibraryStore(ctx: Context) {
     fun flush() {
         pendingSave?.cancel()
         writeSnapshotSync(history.toList(), favorites.toMap())
-        sp.edit().putString("search", JSONArray(searchHistory.toList()).toString()).commit()
+        sp.edit()
+            .putString("search", JSONArray(searchHistory.toList()).toString())
+            .putString("searchMeta", searchHistoryMeta().toJSON().toString())
+            .commit()
     }
 
     /** Reload all library state from SharedPreferences on Main thread after backup restore. */
@@ -146,6 +251,7 @@ class LibraryStore(ctx: Context) {
         incomingProgress: List<WatchProgress>,
         incomingFavorites: List<Triple<String, Pair<String, String>, Long>>,
         incomingSearch: List<String>,
+        incomingSearchMeta: SearchHistoryMeta = SearchHistoryMeta(),
     ) {
         val bySid = LinkedHashMap<String, WatchProgress>()
         for (p in history) bySid[p.seriesId] = p
@@ -165,10 +271,19 @@ class LibraryStore(ctx: Context) {
                 updatePeek(sid, pair.first, pair.second)
             }
         }
-        if (incomingSearch.isNotEmpty()) {
-            val merged = (searchHistory.toList() + incomingSearch).distinct().take(20)
+        if (incomingSearch.isNotEmpty() || incomingSearchMeta.clearedAt > 0L || incomingSearchMeta.deleted.isNotEmpty()) {
+            val (mergedItems, mergedMeta) = mergeSearchHistoryState(
+                localItems = searchHistory.toList(),
+                localMeta = searchHistoryMeta(),
+                incomingItems = incomingSearch,
+                incomingMeta = incomingSearchMeta,
+                limit = SEARCH_HISTORY_LIMIT,
+            )
             searchHistory.clear()
-            searchHistory.addAll(merged)
+            searchHistory.addAll(mergedItems)
+            searchAdded.clear(); searchAdded.putAll(mergedMeta.added)
+            searchDeleted.clear(); searchDeleted.putAll(mergedMeta.deleted)
+            searchClearedAt = mergedMeta.clearedAt
             saveSearch()
         }
         flush()
@@ -210,6 +325,63 @@ class LibraryStore(ctx: Context) {
         pendingSave = io.launch {
             delay(120)
             writeSnapshotSync(h, fav)
+        }
+    }
+
+    companion object {
+        const val SEARCH_HISTORY_LIMIT = 20
+        private const val MAX_SEARCH_TOMBSTONES = 100
+
+        /**
+         * Tombstone-aware LWW merge for search history:
+         * - Deleting or clearing locally suppresses older remote items on WebDAV sync.
+         * - Re-searching a term later (higher added timestamp) restores it cleanly.
+         * - Restoring a legacy backup (no metadata) into a fresh install works seamlessly.
+         */
+        fun mergeSearchHistoryState(
+            localItems: List<String>,
+            localMeta: SearchHistoryMeta,
+            incomingItems: List<String>,
+            incomingMeta: SearchHistoryMeta,
+            limit: Int = SEARCH_HISTORY_LIMIT,
+        ): Pair<List<String>, SearchHistoryMeta> {
+            val clearedAt = maxOf(localMeta.clearedAt, incomingMeta.clearedAt)
+            val deleted = LinkedHashMap<String, Long>()
+            for ((k, v) in localMeta.deleted) deleted[k] = v
+            for ((k, v) in incomingMeta.deleted) {
+                val prev = deleted[k] ?: 0L
+                if (v > prev) deleted[k] = v
+            }
+            val added = LinkedHashMap<String, Long>()
+            for ((k, v) in localMeta.added) added[k] = v
+            for ((k, v) in incomingMeta.added) {
+                val prev = added[k] ?: 0L
+                if (v > prev) added[k] = v
+            }
+
+            val candidates = LinkedHashSet<String>()
+            for (raw in localItems) raw.trim().takeIf { it.isNotEmpty() }?.let { candidates += it }
+            for (raw in incomingItems) raw.trim().takeIf { it.isNotEmpty() }?.let { candidates += it }
+
+            val alive = candidates.filter { term ->
+                val addedTs = added[term] ?: 0L
+                val deletedTs = deleted[term] ?: 0L
+                if (deletedTs > 0L) {
+                    addedTs > deletedTs && addedTs > clearedAt
+                } else if (clearedAt > 0L) {
+                    addedTs > clearedAt
+                } else {
+                    true
+                }
+            }.sortedByDescending { added[it] ?: 0L }.take(limit)
+
+            val aliveSet = alive.toHashSet()
+            val trimmedAdded = added.filterKeys { it in aliveSet }
+            val trimmedDeleted = if (deleted.size > MAX_SEARCH_TOMBSTONES) {
+                deleted.entries.sortedByDescending { it.value }.take(MAX_SEARCH_TOMBSTONES).associate { it.key to it.value }
+            } else deleted
+
+            return alive to SearchHistoryMeta(added = trimmedAdded, deleted = trimmedDeleted, clearedAt = clearedAt)
         }
     }
 }

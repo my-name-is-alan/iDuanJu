@@ -251,6 +251,12 @@ class PlayerSession internal constructor(
 
     internal fun start() {
         current = this
+        app.iduanju.music.AppAudioArbiter.videoHooks = object : app.iduanju.music.AppAudioArbiter.VideoHooks {
+            override fun pauseForMusicTakeover() {
+                player.playWhenReady = false
+            }
+        }
+        app.iduanju.music.AppAudioArbiter.claim(app.iduanju.music.AppAudioArbiter.Owner.VIDEO)
         player.addListener(listener)
         if (!queued) loadDetail()
         pollJob = scope.launch { poll() }
@@ -268,7 +274,12 @@ class PlayerSession internal constructor(
         player.removeListener(listener)
         seekExtractor.release()
         // the next player may be loading already
-        if (current === this) { current = null; CencStore.focus(null); EpisodeCache.abandon(null) }
+        if (current === this) {
+            current = null
+            CencStore.focus(null)
+            EpisodeCache.abandon(null)
+            app.iduanju.music.AppAudioArbiter.release(app.iduanju.music.AppAudioArbiter.Owner.VIDEO)
+        }
         if (!queued) player.release()
     }
 
@@ -493,6 +504,14 @@ class PlayerSession internal constructor(
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
                 android.util.Log.w("IDJ", "Player media load failed", e)
+                if (!refreshed && !channelList && (reused || app.iduanju.data.Catalog.isHongguo(seriesId))) {
+                    refreshed = true
+                    EpisodeCache.forget(ep)
+                    status = "重新取流中…"
+                    delay(350L)
+                    load(positionMs = startAt.takeIf { it > 0L }, forced = null, forceResolve = true)
+                    return@launch
+                }
                 status = ""
                 val reason = (e as? app.iduanju.core.util.ProviderException)?.message?.takeIf { it.isNotBlank() }
                     ?: (e as? IllegalStateException)?.message?.takeIf { it.isNotBlank() && it.any { c -> c.code > 0x2e80 } }
@@ -550,7 +569,7 @@ class PlayerSession internal constructor(
         if (channelList || queued || fixture || app.iduanju.data.Catalog.isTVBox(seriesId) || !IdjApp.instance.settings.prefetchEnabled) return
         val index = epIndex
         prefetchJob = scope.launch {
-            delay(2_000)
+            delay(3_000)
             while (!firstFrame) delay(500)
             val long = clock.dur > 15 * 60_000L
             // Long titles: only near the end, so a signed address does not expire before it is used.
@@ -558,8 +577,8 @@ class PlayerSession internal constructor(
             val prefer = lib.preferredQuality(seriesId)
             episodes.getOrNull(index + 1)?.let { EpisodeCache.preload(it, prefer) }
             if (!long && seriesId.all { it.isDigit() }) {
-                delay(2_500)
-                episodes.getOrNull(index + 2)?.let { EpisodeCache.warm(it, prefer) }
+                delay(4_500)
+                if (epIndex == index) episodes.getOrNull(index + 2)?.let { EpisodeCache.warm(it, prefer) }
             }
         }
     }
@@ -573,6 +592,21 @@ class PlayerSession internal constructor(
             // opening (container check, playlist) is part of the limit
             delay(((if (live) LIVE_FIRST_FRAME_MS else FIRST_FRAME_MS) - (System.currentTimeMillis() - openedAt)).coerceAtLeast(MIN_FIRST_FRAME_MS))
             if (firstFrame || !mediaReady || playsUnseen()) return@launch
+            // Some OEM codecs reuse the surface across back-to-back episodes without firing onRenderedFirstFrame again.
+            if (player.playbackState == Player.STATE_READY && player.isPlaying && player.currentPosition > startedAt + 400L) {
+                frameShown()
+                return@launch
+            }
+            if (!refreshed && !channelList) {
+                refreshed = true
+                episode?.let { ep ->
+                    val cur = playable
+                    if (cur != null && cur.encrypted && cur.uri.startsWith("/")) EpisodeCache.discard(ep, cur.uri) else EpisodeCache.forget(ep)
+                }
+                hint = "加载较慢，正在重新取流…"
+                load(resumeAnchor(), forced = null, forceResolve = true)
+                return@launch
+            }
             if (failover(if (live) "信号较慢" else "加载较慢")) return@launch
             // Nothing else to try: give the only source more time before giving up.
             delay(LAST_CHANCE_MS)
@@ -944,6 +978,9 @@ class PlayerSession internal constructor(
                 clock.buffered = player.bufferedPosition
             }
             playing = isPlaying
+            if (isPlaying && !firstFrame && mediaReady && player.playbackState == Player.STATE_READY && clock.pos > startedAt + 500L && hasSurface()) {
+                frameShown()
+            }
             if (isPlaying) { watchedMs[0] += 250L; if (firstFrame) { refill(); watchRendering() } }
             if (sleepMode > 0 && sleepEndMs > 0L && System.currentTimeMillis() >= sleepEndMs) {
                 player.pause()

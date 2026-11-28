@@ -3,26 +3,57 @@ import SwiftUI
 /// 四个根页面 + 窄屏底部悬浮玻璃胶囊 / 平板宽屏左侧悬浮玻璃导航轨（系统 TabBar 隐藏）。
 /// 导航栏只在根页面显示；进入详情 / 播放器等二级页面时隐藏。
 struct RootTabView: View {
+    struct TabItem: Identifiable, Equatable {
+        let id: Int
+        let title: String
+        let symbol: String
+    }
+
     @Environment(\.colorScheme) private var colorScheme
+    @ObservedObject private var musicPlayer = MusicPlayerEngine.shared
+    @ObservedObject private var gate = SourceGate.shared
     @State private var tab: Int
     @State private var mountedTabs: Set<Int>
-    @State private var paths = [NavigationPath(), NavigationPath(), NavigationPath(), NavigationPath(), NavigationPath()]
-    @State private var tabBarHidden = false
-    @State private var restoreTask: Task<Void, Never>?
-    static let items: [(String, String)] = [("首页", "house.fill"), ("TVBox", "tv.fill"),
-                                            ("找剧", "square.grid.2x2.fill"), ("我的", "person.crop.circle.fill")]
+    @State private var paths = [NavigationPath(), NavigationPath(), NavigationPath(), NavigationPath(), NavigationPath(), NavigationPath()]
+
+    static let musicTabId = 3
+    static let profileTabId = 4
+    static let searchTabId = 5
+
+    static func visibleItems(showMusic: Bool) -> [TabItem] {
+        var list: [TabItem] = [
+            TabItem(id: 0, title: "首页", symbol: "house.fill"),
+            TabItem(id: 1, title: "TVBox", symbol: "tv.fill"),
+            TabItem(id: 2, title: "找剧", symbol: "square.grid.2x2.fill"),
+        ]
+        if showMusic {
+            list.append(TabItem(id: musicTabId, title: "音乐", symbol: "music.note"))
+        }
+        list.append(TabItem(id: profileTabId, title: "我的", symbol: "person.crop.circle.fill"))
+        return list
+    }
 
     init() {
-        let initial = Int(ProcessInfo.processInfo.environment["STV_TAB"] ?? "") ?? 0
+        let env = ProcessInfo.processInfo.environment
+        let initial: Int
+        if env["STV_HOME_TAB"] == "music" || env["STV_HOME_SRC"] == "music" {
+            initial = Self.musicTabId
+        } else if let raw = env["STV_TAB"], let idx = Int(raw), (0...Self.searchTabId).contains(idx) {
+            initial = idx
+        } else {
+            initial = 0
+        }
         _tab = State(initialValue: initial)
         _mountedTabs = State(initialValue: [initial])
     }
     var body: some View {
         GeometryReader { geo in
             let metrics = LayoutMetrics(width: geo.size.width, height: geo.size.height)
+            let navItems = Self.visibleItems(showMusic: gate.showMusicTab)
             let showNav = paths[tab].isEmpty
             let showRail = showNav && metrics.useRail
-            let showBottomBar = showNav && !metrics.useRail && !tabBarHidden
+            let showBottomBar = showNav && !metrics.useRail
+            let rootBg = (tab == Self.musicTabId) ? YMTheme.base(colorScheme) : STVTheme.bg
             ZStack(alignment: .leading) {
                 // Deterministic lazy-mounted tab container: avoids UIKit TabView(.toolbar(.hidden)) selection
                 // desyncs on iOS 18/26 while keeping each visited tab's NavigationStack and scroll state alive.
@@ -31,65 +62,54 @@ struct RootTabView: View {
                     tabSlot(0, reserveBottomBar: !metrics.useRail, leadingRail: railInset) { HomeView() }
                     tabSlot(1, reserveBottomBar: !metrics.useRail, leadingRail: railInset) { TVBoxHubView() }
                     tabSlot(2, reserveBottomBar: !metrics.useRail, leadingRail: railInset) { CategoryView() }
-                    tabSlot(3, reserveBottomBar: !metrics.useRail, leadingRail: railInset) { ProfileView() }
-                    tabSlot(4, reserveBottomBar: !metrics.useRail, leadingRail: railInset) { SearchView() }
+                    if gate.showMusicTab {
+                        tabSlot(Self.musicTabId, reserveBottomBar: !metrics.useRail, leadingRail: railInset) { MusicHomeView(isRootTab: true) }
+                    }
+                    tabSlot(Self.profileTabId, reserveBottomBar: !metrics.useRail, leadingRail: railInset) { ProfileView() }
+                    tabSlot(Self.searchTabId, reserveBottomBar: !metrics.useRail, leadingRail: railInset) { SearchView() }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(STVTheme.bg.ignoresSafeArea())
+                .background(rootBg.ignoresSafeArea())
                 .tint(STVTheme.accent)
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 8)
-                        .onChanged { value in
-                            guard showNav && !metrics.useRail else { return }
-                            let dy = value.translation.height
-                            let dx = value.translation.width
-                            guard abs(dy) > abs(dx) * 1.2 else { return }
-                            if dy < -14 {
-                                restoreTask?.cancel()
-                                if !tabBarHidden { tabBarHidden = true }
-                            } else if dy > 14 {
-                                restoreTask?.cancel()
-                                if tabBarHidden { tabBarHidden = false }
-                            }
-                        }
-                        .onEnded { _ in
-                            guard tabBarHidden else { return }
-                            restoreTask?.cancel()
-                            restoreTask = Task { @MainActor in
-                                try? await Task.sleep(nanoseconds: 450_000_000)
-                                guard !Task.isCancelled else { return }
-                                tabBarHidden = false
-                            }
-                        }
-                )
                 .overlay(alignment: .bottom) {
-                    Group {
+                    VStack(spacing: 10) {
+                        if !metrics.useRail && musicPlayer.shouldShowGlobalMiniBar {
+                            MusicMiniPlayerBar()
+                                .padding(.horizontal, 14)
+                                .padding(.bottom, showBottomBar ? 0 : 10)
+                                .transition(.move(edge: .bottom).combined(with: .opacity))
+                        }
                         if showBottomBar {
-                            GlassTabBar(selection: $tab, items: Self.items) { i in
+                            GlassTabBar(selection: $tab, items: navItems) { i in
                                 if i == tab { paths[i] = NavigationPath() }
                             }
                             .transition(.move(edge: .bottom).combined(with: .opacity))
                         }
                     }
                     .animation(DS.select, value: showBottomBar)
+                    .animation(DS.select, value: musicPlayer.shouldShowGlobalMiniBar)
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if metrics.useRail && musicPlayer.shouldShowGlobalMiniBar {
+                        MusicMiniPlayerBar()
+                            .frame(maxWidth: 360)
+                            .padding(.trailing, 20)
+                            .padding(.bottom, 16)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
                 }
                 .compatOnChange(of: tab) { next in
                     mountedTabs.insert(next)
-                    restoreTask?.cancel()
-                    tabBarHidden = false
                 }
-                .compatOnChange(of: showNav) { visible in
-                    if !visible {
-                        restoreTask?.cancel()
-                        tabBarHidden = false
-                    }
+                .compatOnChange(of: gate.showMusicTab) { on in
+                    if !on && tab == Self.musicTabId { tab = 0 }
                 }
                 .compatOnChange(of: colorScheme) { _ in
                     StatusBarGate.shared.refreshAppearance()
                 }
                 Group {
                     if showRail {
-                        GlassNavigationRail(selection: $tab, items: Self.items, searchTag: 4) { i in
+                        GlassNavigationRail(selection: $tab, items: navItems, searchTag: Self.searchTabId) { i in
                             if i == tab { paths[i] = NavigationPath() }
                         }
                         .transition(.move(edge: .leading).combined(with: .opacity))
@@ -98,6 +118,9 @@ struct RootTabView: View {
                 .animation(DS.select, value: showRail)
             }
             .environment(\.layoutMetrics, metrics)
+        }
+        .fullScreenCover(isPresented: $musicPlayer.showFullPlayer) {
+            MusicNowPlayingView()
         }
         .onAppear {
             Router.handler = { r in paths[tab].append(r) }
@@ -145,31 +168,30 @@ private struct Stack<V: View>: View {
 struct GlassTabBar: View {
     static let clearance: CGFloat = 72
     @Binding var selection: Int
-    let items: [(String, String)]
+    let items: [RootTabView.TabItem]
     var searchTag: Int? = nil
     var onReselect: (Int) -> Void = { _ in }
     @Namespace private var ns
     var body: some View {
-        LiquidGlassGroup(spacing: 10) {
-            HStack(spacing: 10) {
-                HStack(spacing: 4) {
-                    ForEach(items.indices, id: \.self) { i in
-                        NavBarItem(title: items[i].0, symbol: items[i].1, on: i == selection, height: 48, ns: ns) { pick(i) }
-                            .accessibilityIdentifier("tab.\(i)")
-                    }
-                }
-                .padding(6)
-                .liquidGlassCapsule(interactive: true)
-                .animation(DS.select, value: selection)
-
-                if let searchTag {
-                    NavSearchButton(on: selection == searchTag, size: 60) { pick(searchTag) }
+        HStack(spacing: 10) {
+            HStack(spacing: 2) {
+                ForEach(items) { item in
+                    NavBarItem(id: item.id, title: item.title, symbol: item.symbol, on: item.id == selection, height: 50, ns: ns) { pick(item.id) }
+                        .accessibilityIdentifier("tab.\(item.id)")
                 }
             }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 5)
+            .background(YMDockSurface(shape: Capsule(style: .continuous)))
+            .animation(.spring(response: 0.34, dampingFraction: 0.78), value: selection)
+
+            if let searchTag {
+                NavSearchButton(on: selection == searchTag, size: 60) { pick(searchTag) }
+            }
         }
-        .frame(maxWidth: 420)
+        .frame(maxWidth: 440)
         .padding(.horizontal, 16)
-        .padding(.bottom, -8)
+        .padding(.bottom, -6)
     }
 
     private func pick(_ i: Int) {
@@ -177,25 +199,34 @@ struct GlassTabBar: View {
     }
 }
 
-/// One destination of the tab bar / rail; the selection thumb slides between neighbours.
+/// One destination of the Yimeng-faithful tab bar / rail: hand-drawn double-pass crayon glyph + sliding obsidian/cream pill.
 private struct NavBarItem: View {
+    let id: Int
     let title: String
     let symbol: String
     let on: Bool
     let height: CGFloat
     let ns: Namespace.ID
     let action: () -> Void
+    @Environment(\.colorScheme) private var scheme
+
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 2) {
-                Image(systemName: symbol).font(.system(size: 17, weight: on ? .semibold : .regular)).frame(height: 20)
-                Text(title).font(.system(size: 11, weight: on ? .semibold : .medium))
+            VStack(spacing: 3) {
+                if let glyph = YMTabGlyph(rawValue: id) {
+                    YMTabIcon(glyph: glyph, size: 21, active: on)
+                } else {
+                    Image(systemName: symbol).font(.system(size: 17, weight: on ? .semibold : .regular)).frame(height: 21)
+                }
+                Text(title).font(.system(size: 10, weight: on ? .bold : .medium))
             }
-            .foregroundStyle(on ? STVTheme.accent : STVTheme.secondary)
+            .foregroundStyle(on ? YMTheme.accent(scheme) : YMTheme.fg(scheme).opacity(0.68))
             .frame(maxWidth: .infinity).frame(height: height)
             .background {
                 if on {
-                    Capsule(style: .continuous).fill(STVTheme.glassBorder).matchedGeometryEffect(id: "pill", in: ns)
+                    Capsule(style: .continuous)
+                        .fill(scheme == .dark ? Color.white.opacity(0.11) : Color.black.opacity(0.08))
+                        .matchedGeometryEffect(id: "pill", in: ns)
                 }
             }
             .contentShape(Capsule())
@@ -213,11 +244,9 @@ private struct NavSearchButton: View {
     let action: () -> Void
     var body: some View {
         Button(action: action) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 19, weight: on ? .bold : .semibold))
-                .foregroundStyle(on ? STVTheme.accent : STVTheme.text)
+            YMTabIcon(glyph: .search, size: 20, active: on)
                 .frame(width: size, height: size)
-                .liquidGlass(Circle(), interactive: true)
+                .background(YMDockSurface(shape: Circle()))
                 .contentShape(Circle())
         }
         .buttonStyle(PressScale(scale: 0.94))
@@ -227,35 +256,33 @@ private struct NavSearchButton: View {
     }
 }
 
-/// Vertical floating 72pt Liquid Glass navigation rail for Expanded iPad / Stage Manager widths (>= 840pt).
+/// Vertical floating 72pt Yimeng-styled navigation rail for Expanded iPad / Stage Manager widths (>= 840pt).
 struct GlassNavigationRail: View {
     @Binding var selection: Int
-    let items: [(String, String)]
+    let items: [RootTabView.TabItem]
     var searchTag: Int? = nil
     var onReselect: (Int) -> Void = { _ in }
     @Namespace private var ns
     var body: some View {
-        LiquidGlassGroup(spacing: 12) {
-            VStack(spacing: 12) {
-                if let searchTag {
-                    NavSearchButton(on: selection == searchTag, size: 48, accessibilityID: "home.search") { pick(searchTag) }
+        VStack(spacing: 12) {
+            if let searchTag {
+                NavSearchButton(on: selection == searchTag, size: 48, accessibilityID: "home.search") { pick(searchTag) }
+            }
+            Spacer(minLength: 8)
+            VStack(spacing: 6) {
+                ForEach(items) { item in
+                    NavBarItem(id: item.id, title: item.title, symbol: item.symbol, on: item.id == selection, height: 52, ns: ns) { pick(item.id) }
+                        .accessibilityIdentifier("tab.\(item.id)")
                 }
-                Spacer(minLength: 8)
-                VStack(spacing: 6) {
-                    ForEach(items.indices, id: \.self) { i in
-                        NavBarItem(title: items[i].0, symbol: items[i].1, on: i == selection, height: 52, ns: ns) { pick(i) }
-                            .accessibilityIdentifier("tab.\(i)")
-                    }
-                }
-                .frame(width: 56)
-                .padding(.vertical, 6)
-                .padding(.horizontal, 4)
-                .liquidGlass(corner: 30, interactive: true)
-                .animation(DS.select, value: selection)
-                Spacer(minLength: 8)
-                if searchTag != nil {
-                    Color.clear.frame(height: 48)
-                }
+            }
+            .frame(width: 56)
+            .padding(.vertical, 6)
+            .padding(.horizontal, 4)
+            .background(YMDockSurface(shape: RoundedRectangle(cornerRadius: 30, style: .continuous)))
+            .animation(.spring(response: 0.34, dampingFraction: 0.78), value: selection)
+            Spacer(minLength: 8)
+            if searchTag != nil {
+                Color.clear.frame(height: 48)
             }
         }
         .padding(.leading, 12)

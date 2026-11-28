@@ -635,13 +635,20 @@ class HongguoClient(
         throw lastErr
     }
 
+    private val resolveLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+    private val identityLock = Any()
+
     // ---- resolve ----
-    fun resolve(vid: String): HGResolvedVideo {
-        synchronized(resolveCache) {
-            resolveCache[vid]?.let { (v, at) ->
-                val urlAlive = (v.expiresAt <= 0) || (v.expiresAt > System.currentTimeMillis() / 1000 + 60)
-                if (System.currentTimeMillis() - at < RESOLVE_TTL_MS && urlAlive) return v
-                resolveCache.remove(vid)
+    fun resolve(vid: String, force: Boolean = false): HGResolvedVideo {
+        if (force) {
+            synchronized(resolveCache) { resolveCache.remove(vid) }
+        } else {
+            synchronized(resolveCache) {
+                resolveCache[vid]?.let { (v, at) ->
+                    val urlAlive = (v.expiresAt <= 0) || (v.expiresAt > System.currentTimeMillis() / 1000 + 60)
+                    if (System.currentTimeMillis() - at < RESOLVE_TTL_MS && urlAlive) return v
+                    resolveCache.remove(vid)
+                }
             }
         }
         val r = resolveFresh(vid)
@@ -651,7 +658,7 @@ class HongguoClient(
         return r
     }
 
-    @Synchronized fun resolveFresh(vid: String): HGResolvedVideo {
+    fun resolveFresh(vid: String): HGResolvedVideo = synchronized(resolveLocks.computeIfAbsent(vid) { Any() }) {
         require(vid.matches(Regex("[0-9]{1,30}"))) { "红果分集 ID 无效" }
         var lastErr: Exception = ProviderException.upstream("没有可用播放流")
 
@@ -661,15 +668,22 @@ class HongguoClient(
                     resolvePreloadV5(vid, identity)
                 } catch (_: PlayerEmptyBody) {
                     if (identity.registeredAt > 0L && nowMs() - identity.registeredAt < 8_000L) {
-                        Thread.sleep(1_500L)
+                        Thread.sleep(1_200L)
                         try {
                             resolvePreloadV5(vid, identity)
                         } catch (_: PlayerEmptyBody) {
+                            resolveVideoTabV5(vid, identity)
+                        } catch (_: Exception) {
                             resolveVideoTabV5(vid, identity)
                         }
                     } else {
                         resolveVideoTabV5(vid, identity)
                     }
+                } catch (preloadErr: Exception) {
+                    // preload/v1 occasionally omits one episode under burst load ("缺少请求的分集" / 429 / 5xx):
+                    // always fall back to video_tab before failing this identity.
+                    lastErr = preloadErr
+                    resolveVideoTabV5(vid, identity)
                 }
                 if (r.err == null && r.streams.isNotEmpty()) {
                     lastPureRoute = routeLabel
@@ -691,13 +705,18 @@ class HongguoClient(
                     primary.did == fallbackIdentity().did -> "verified-v5"
                     else -> "registered-v5"
                 }
-                tryIdentity(primary, label)?.let { return it }
+                tryIdentity(primary, label)?.let { return@synchronized it }
             } catch (_: PlayerEmptyBody) {
                 if (!hasPureOverride()) {
-                    playerRejected += primary.did
-                    if (playerIdentity?.did == primary.did) {
-                        playerIdentity = null
-                        HGOneShotDevice.reset(dataDir)
+                    synchronized(identityLock) {
+                        // Never permanently ban the verified fallback identity on a transient empty burst.
+                        if (primary.did != fallbackIdentity().did) {
+                            playerRejected += primary.did
+                            if (playerIdentity?.did == primary.did) {
+                                playerIdentity = null
+                                HGOneShotDevice.reset(dataDir)
+                            }
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -711,13 +730,15 @@ class HongguoClient(
             } else {
                 fallbackIdentity()
             }
-            if (secondary != null && secondary.did !in playerRejected) {
+            if (secondary != null && synchronized(identityLock) { secondary.did !in playerRejected }) {
                 try {
                     val label = if (secondary.did == fallbackIdentity().did) "verified-v5" else "registered-v5"
                     tryIdentity(secondary, label)?.let {
-                        playerIdentity = secondary
-                        HGOneShotDevice.save(dataDir, secondary)
-                        return it
+                        synchronized(identityLock) {
+                            playerIdentity = secondary
+                            HGOneShotDevice.save(dataDir, secondary)
+                        }
+                        return@synchronized it
                     }
                 } catch (e: Exception) {
                     lastErr = e
@@ -728,7 +749,7 @@ class HongguoClient(
         HGProtocol.refreshAsync(http, dataDir, force = true)
         resolveWebFallback(vid)?.let { web ->
             lastPureRoute = "web-fallback"
-            return web
+            return@synchronized web
         }
         if (lastErr is PlayerEmptyBody) {
             throw ProviderException.upstream("取流被上游空包拒绝，请稍后重试或在「我的」重置红果设备")
@@ -958,23 +979,23 @@ class HongguoClient(
         return nowMs() + playerTimeOffset
     }
 
-    @Synchronized private fun ensurePlayerIdentity(failedID: String = ""): HGOneShotDevice.Identity {
+    private fun ensurePlayerIdentity(failedID: String = ""): HGOneShotDevice.Identity = synchronized(identityLock) {
         if (failedID.isNotEmpty()) {
             playerRejected += failedID
             if (playerIdentity?.did == failedID) playerIdentity = null
         }
-        playerIdentity?.takeIf { it.isUsable && it.did !in playerRejected && it.did != failedID }?.let { return it }
+        playerIdentity?.takeIf { it.isUsable && it.did !in playerRejected && it.did != failedID }?.let { return@synchronized it }
         HGOneShotDevice.load(dataDir)?.takeIf { it.did !in playerRejected && it.did != failedID }?.let { saved ->
             playerIdentity = saved
             playerRegisteredAt = saved.registeredAt
-            return saved
+            return@synchronized saved
         }
         if (HGProtocol.current.preferFallbackIdentity) {
             val fb = fallbackIdentity()
             if (fb.isUsable && fb.did !in playerRejected && fb.did != failedID) {
                 playerIdentity = fb
                 playerRegisteredAt = 0L
-                return fb
+                return@synchronized fb
             }
         }
         if (System.currentTimeMillis() < playerBlockedUntil) throw ProviderException.upstream("播放器设备注册冷却中，请稍后重试")
@@ -985,7 +1006,7 @@ class HongguoClient(
         HGOneShotDevice.save(dataDir, id)
         playerIdentity = id
         playerRegisteredAt = id.registeredAt
-        return id
+        id
     }
 
     /** Pure player device: override, else the player-profile registered identity. */

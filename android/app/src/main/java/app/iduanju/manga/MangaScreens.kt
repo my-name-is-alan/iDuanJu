@@ -324,6 +324,10 @@ object MangaReaderState { var detail: MangaDetail? = null }
 @Composable
 fun MangaReaderScreen(id: String, startIndex: Int, startPage: Int, onBack: () -> Unit) {
     val store = IdjApp.instance.manga
+    DisposableEffect(Unit) {
+        IdjApp.instance.musicPlayer.enterImmersive("mangaReader")
+        onDispose { IdjApp.instance.musicPlayer.leaveImmersive("mangaReader") }
+    }
     val d = MangaReaderState.detail?.takeIf { it.item.id == id } ?: run { onBack(); return }
     val p = remember(d.item.source) { store.provider(d.item.source) }
     val ctx = LocalContext.current
@@ -392,14 +396,21 @@ fun MangaReaderScreen(id: String, startIndex: Int, startPage: Int, onBack: () ->
                         backdrop = glass, size = 44.dp, iconSize = 22.dp, dark = true,
                     ) { vertical = !vertical; sp.edit().putBoolean("stv.manga.vertical", vertical).apply() }
                 }
-                Row(
-                    Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(horizontal = 30.dp, vertical = 10.dp).widthIn(max = 480.dp).fillMaxWidth()
-                        .glassSurface(RoundedCornerShape(50), backdrop = glass, dark = true, shadowRadius = 12.dp).padding(horizontal = 12.dp, vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                Column(
+                    Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(horizontal = 24.dp, vertical = 10.dp).widthIn(max = 480.dp).fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    PlainIconButton(Icons.Filled.SkipPrevious, "上一章", tint = Color.White, iconSize = 26.dp, enabled = index > 0) { index-- }
-                    Text(if (pages.isEmpty()) "" else "${current + 1} / ${pages.size}", color = Color.White, fontSize = 13.sp, textAlign = TextAlign.Center, style = Tabular, modifier = Modifier.weight(1f))
-                    PlainIconButton(Icons.Filled.SkipNext, "下一章", tint = Color.White, iconSize = 26.dp, enabled = index + 1 < d.chapters.size) { index++ }
+                    app.iduanju.music.ReaderMusicMiniBar(Modifier.fillMaxWidth())
+                    Row(
+                        Modifier.fillMaxWidth()
+                            .glassSurface(RoundedCornerShape(50), backdrop = glass, dark = true, shadowRadius = 12.dp).padding(horizontal = 12.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        PlainIconButton(Icons.Filled.SkipPrevious, "上一章", tint = Color.White, iconSize = 26.dp, enabled = index > 0) { index-- }
+                        Text(if (pages.isEmpty()) "" else "${current + 1} / ${pages.size}", color = Color.White, fontSize = 13.sp, textAlign = TextAlign.Center, style = Tabular, modifier = Modifier.weight(1f))
+                        PlainIconButton(Icons.Filled.SkipNext, "下一章", tint = Color.White, iconSize = 26.dp, enabled = index + 1 < d.chapters.size) { index++ }
+                    }
                 }
             }
         }

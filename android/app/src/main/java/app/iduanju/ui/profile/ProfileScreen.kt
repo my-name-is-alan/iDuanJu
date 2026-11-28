@@ -7,6 +7,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material3.Text
@@ -163,6 +164,15 @@ fun ProfileScreen(onOpenDetail: (String) -> Unit = {}) {
             LinkRow("漫画", ProfileIcons.manga, trailing = ia.manga.favorites.size.takeIf { it > 0 }?.let { "收藏 $it" }) { go("home/manga") }
             RowDivider()
             LinkRow("小说", ProfileIcons.manga, sub = "TXT、阅读书源、搜索与发现") { go("novel") }
+            RowDivider()
+            val loggedMusic = ia.musicStore.sourcePrefs.count { !it.customCookie.isNullOrBlank() }
+            val totalMusicSrc = ia.musicStore.enabledOnlineSources.size + ia.musicStore.nasConfigs.size
+            LinkRow(
+                "音乐与音源设置",
+                Icons.Filled.MusicNote,
+                sub = "账号登录、音源优先级、个人 NAS 与缓存",
+                trailing = if (loggedMusic > 0) "已登 $loggedMusic · $totalMusicSrc 源" else "$totalMusicSrc 源",
+            ) { go("music/settings") }
             RowDivider()
             LinkRow("下载管理", ProfileIcons.download, trailing = "暂未支持") { notify("Android 版暂不支持离线下载") }
         }

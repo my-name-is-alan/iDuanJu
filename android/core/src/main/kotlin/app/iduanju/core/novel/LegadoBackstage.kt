@@ -1,8 +1,7 @@
-/* Port of the request contract in legado-E help/http/BackstageWebView.kt and
- * model/analyzeRule/AnalyzeUrl.kt (useWebView/webJs/webViewDelayTime/sourceRegex) at
- * 8b87c5aba4df91c39a3a0939a68a1180b9f2ee1c, Copyright Legado contributors, GPL-3.0.
- * Adapted for iDuanJu: platform WebView is injected; no JS bridge objects, no TLS-error proceed,
- * private-network navigation blocked, cookie/authorization only for the source's own origin. */
+/* Port of the request contract in legado-E / LegadoTeam/legado help/http/BackstageWebView.kt
+ * and AnalyzeUrl (useWebView/webJs/webViewDelayTime/sourceRegex/overrideUrlRegex/POST).
+ * Adapted for iDuanJu: platform WebView & interactive browser are injected; TLS errors are NOT bypassed;
+ * private-network navigation blocked; cookie/authorization scoped safely. GPL-3.0. */
 package app.iduanju.core.novel
 
 import org.json.JSONArray
@@ -16,13 +15,25 @@ data class BackstageRequest(
     val sourceRegex: String?,
     val delayMs: Long,
     val timeoutMs: Long = 60_000L,
+    val method: String = "GET",
+    val body: String? = null,
+    val html: String? = null,
+    val overrideUrlRegex: String? = null,
+    val useCookies: Boolean = false,
 )
 
 /** Platform implementation (Android WebView). Blocking; never call on the main thread. Interrupt cancels. */
 fun interface LegadoBackstage { fun load(request: BackstageRequest): NovelSources.PageResponse }
 
+/** Optional interactive browser launcher for `java.startBrowser` / `startBrowserAwait` / login pages. */
+fun interface LegadoInteractiveBrowser {
+    fun open(url: String, html: String?, title: String, userAgent: String?, waitForClose: Boolean): String
+}
+
 object LegadoWebView {
     @Volatile var backstage: LegadoBackstage? = null
+    @Volatile var browser: LegadoInteractiveBrowser? = null
+
     /** Upstream BackstageWebView.JS */
     const val DEFAULT_JS = "document.documentElement.outerHTML"
     /** Upstream EvalJsRunnable: first try after 100+delay ms, then these intervals, give up after 30 retries. */
@@ -57,8 +68,5 @@ object LegadoWebView {
     }
 
     /** Lenient URL options like `{webView:“true”}` written with typographic quotes in real sources. */
-    fun options(raw: String): JSONObject {
-        val normalized = raw.replace('“', '"').replace('”', '"')
-        return runCatching { JSONObject(normalized) }.getOrDefault(JSONObject())
-    }
+    fun options(raw: String): JSONObject = LegadoUrlOptions.parseObject(raw)
 }

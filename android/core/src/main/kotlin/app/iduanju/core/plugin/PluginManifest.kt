@@ -8,7 +8,8 @@ import java.util.Base64
 /** idj1 plugin manifest (docs/plugins/SPEC_ZH.md) — 1:1 with iOS PluginManifest. Only idj1 is accepted. */
 enum class PluginType(val label: String, val required: List<String>) {
     video("长视频", listOf("detail", "play")), shortdrama("短剧", listOf("detail", "play")),
-    comic("漫画", listOf("detail", "pages")), live("直播", listOf("play"));
+    comic("漫画", listOf("detail", "pages")), live("直播", listOf("play")),
+    music("音乐", listOf("play"));
 }
 
 class PluginException(val code: String, message: String) : Exception(message) {
@@ -62,7 +63,7 @@ data class PluginManifest(
         if (!Regex("^[A-Za-z0-9_-]+\\.js$").matches(entry)) p += "entry 必须是同目录下的 .js 文件名"
         if (http.isEmpty()) p += "permissions.http 至少声明一个域名"
         for (d in http + (media ?: emptyList())) if (DomainRule.parse(d) == null) p += "域名格式不对：$d（只允许 example.com 或 *.example.com）"
-        if (type == null) p += "type 只能是 video/shortdrama/comic/live"
+        if (type == null) p += "type 只能是 video/shortdrama/comic/live/music"
         type?.required?.forEach { if (it !in capabilities) p += "type=${type.name} 必须实现 $it" }
         for (s in settings) {
             if (!Regex("^[a-zA-Z][a-zA-Z0-9_]{0,31}$").matches(s.key)) p += "settings.key 不合法：${s.key}"

@@ -69,6 +69,10 @@ private fun PlayerContent(seriesId: String, startEp: Int, onBack: () -> Unit, qu
     val pip = remember(session, activity) { PlayerPip(ctx, activity, session, ui) }
     val switchSeries by rememberUpdatedState(onSwitchSeries)
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(Unit) {
+        app.iduanju.IdjApp.instance.musicPlayer.enterImmersive("video")
+        onDispose { app.iduanju.IdjApp.instance.musicPlayer.leaveImmersive("video") }
+    }
     DisposableEffect(session, lifecycleOwner, activity) {
         session.beforePrepare = { enhance.sync(activity); enhance.install() }
         session.onEffectFailure = { enhance.onFailure() }
@@ -205,8 +209,7 @@ private fun PlayerStage(
             backdrop,
             Modifier.align(Alignment.Center),
         )
-        // Minimal 2 dp bottom edge progress while the HUD is hidden (no top title blocking portrait short dramas).
-        if (!ui.showChrome && ui.panel == null && !session.live) EdgeProgressBar(session.clock, Modifier.align(Alignment.BottomCenter))
+        // Immersive playback stays completely clean; timeline is shown only when full controls are visible.
         // Floating seek-bar thumbnail above the thumb while scrubbing; draw-only, no touches.
         if (!session.live) SeekPreviewOverlay(state = seekPreview, extractor = session.seekExtractor, durationProvider = { session.clock.dur },
             coverUrl = session.detail?.cover.orEmpty(), portraitVideo = isPortraitMedia(session))

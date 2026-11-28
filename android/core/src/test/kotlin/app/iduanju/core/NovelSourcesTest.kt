@@ -7,9 +7,9 @@ import org.junit.Test
 
 class NovelSourcesTest {
     @Test fun unsupportedImportsAreNotBadSources() {
-        val result=NovelSources.importReport("""[{"bookSourceUrl":"https://example.org","bookSourceType":2},{"bookSourceUrl":"https://text.example.org","bookSourceType":0}]""")
-        assertEquals(1,result.sources.size);assertEquals(1,result.unsupported);assertTrue(result.message.contains("不是坏源"))
-        assertTrue(NovelSources.importReport("""{"bookSourceUrl":"https://example.org","bookSourceType":3}""").sources.isEmpty())
+        val result=NovelSources.importReport("""[{"bookSourceUrl":"https://unknown.example.org","bookSourceType":99},{"bookSourceUrl":"https://manga.example.org","bookSourceType":2},{"bookSourceUrl":"https://dl.example.org","bookSourceType":3},{"bookSourceUrl":"https://text.example.org","bookSourceType":0}]""")
+        assertEquals(3,result.sources.size);assertEquals(1,result.unsupported);assertTrue(result.message.contains("不是坏源"))
+        assertTrue(NovelSources.importReport("""{"bookSourceUrl":"https://unknown.example.org","bookSourceType":99}""").sources.isEmpty())
         assertTrue(NovelSources.importReport("""[{"sourceUrl":"https://example.org","ruleArticles":"a"}]""").sources.single().isRSS)
         for(raw in listOf("""{"sites":[],"spider":"x.jar"}""")) {
             try {NovelSources.importReport(raw);fail("unsupported format accepted")}catch(e:IllegalArgumentException){assertTrue(e.message.orEmpty().contains("不是坏源"))}
@@ -113,11 +113,11 @@ class NovelSourcesTest {
         assertNull(NovelScript.bookURL.get())
     }
 
-    @Test fun imageOnlyChapterIsNotCachedAsText() {
-        val s=NovelSource(org.json.JSONObject("""{"bookSourceUrl":"https://image.test","ruleContent":{"content":"@js:'<p><img src=\"page.jpg\"></p>'"}}"""))
+    @Test fun imageOnlyChapterPreservesResolvedInlineImageTag() {
+        val s=NovelSource(org.json.JSONObject("""{"bookSourceUrl":"https://image.test","bookSourceType":2,"ruleContent":{"content":"@js:'<p><img src=\"page.jpg\"></p>'"}}"""))
         NovelSources.fixture={"<html></html>"}
-        val error=assertThrows(Exception::class.java){NovelSources.content(s,NovelChapter("chapter","https://image.test/1"))}
-        assertTrue(error.message!!.contains("图片页"))
+        val body=NovelSources.content(s,NovelChapter("chapter","https://image.test/1"))
+        assertEquals("""<img src="https://image.test/page.jpg"/>""",body)
     }
 
     @Test fun realBundleContainsSourcesAndJsIsReportedClearly() {
@@ -187,6 +187,56 @@ class RealRankRegressionTest {
             assertTrue(toc.size > 1)
             if(id==7){assertEquals(hits.first().name,details.name);assertTrue(details.intro.length>100);assertTrue(details.cover.startsWith("https://"))}
             println("[rank-live] $id ${source.name}: cats=${cats.size} books=${hits.size} toc=${toc.size}")
+        }
+    }
+
+    @Test fun batchSearchCapsNodesCleansThreadLocalAndRespectsInterrupt() {
+        val prevFixture = NovelSources.fixture
+        try {
+            val html = buildString {
+                append("<html><body>")
+                for (i in 1..75) {
+                    append("<div class='item'><a href='/book/$i'>书名$i</a><span>作者$i</span></div>")
+                }
+                append("</body></html>")
+            }
+            NovelSources.fixture = { html }
+            val source = NovelSource(
+                org.json.JSONObject(
+                    """
+                    {
+                      "bookSourceUrl": "https://batch-test.example",
+                      "bookSourceName": "BatchCapSource",
+                      "searchUrl": "/search?q={{key}}",
+                      "ruleSearch": {
+                        "bookList": "div.item",
+                        "name": "a@text",
+                        "author": "span@text",
+                        "bookUrl": "a@href"
+                      }
+                    }
+                    """.trimIndent(),
+                ),
+            )
+
+            // Batch mode caps parsed nodes to 40 per source and clears ThreadLocal HTML buffer on exit.
+            val batchHits = NovelSources.search(source, "书名", batchMode = true)
+            assertEquals(40, batchHits.size)
+            assertEquals(null, NovelScript.src.get())
+
+            // Pre-interrupted worker thread aborts immediately instead of grinding through parse loops.
+            Thread.currentThread().interrupt()
+            var interrupted = false
+            try {
+                NovelSources.search(source, "书名", batchMode = true)
+            } catch (_: InterruptedException) {
+                interrupted = true
+            } finally {
+                Thread.interrupted() // clear flag
+            }
+            assertTrue("Expected interrupted batch search to abort immediately", interrupted)
+        } finally {
+            NovelSources.fixture = prevFixture
         }
     }
 }

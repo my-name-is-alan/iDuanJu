@@ -316,12 +316,13 @@ fun SearchScreen(
 
                 else -> {
                     val typing = query.isNotBlank()
+                    val historySnapshot = lib.searchHistory.toList()
                     Crossfade(targetState = typing, animationSpec = Motion.fade(), label = "searchLandingOrSuggest") { isTyping ->
                         if (isTyping) {
                             SearchSuggestionsList(
                                 query = query.trim(),
                                 sourceLabel = currentSourceLabel,
-                                history = lib.searchHistory,
+                                history = historySnapshot,
                                 hot = hot,
                                 topPadding = topBarH,
                                 bottomPadding = bottomPad,
@@ -331,11 +332,14 @@ fun SearchScreen(
                             )
                         } else {
                             SearchLandingContent(
-                                history = lib.searchHistory,
+                                history = historySnapshot,
                                 editing = editing,
                                 onEditToggle = { editing = it },
                                 onClearHistory = { lib.clearSearch(); editing = false },
-                                onRemoveHistory = { lib.removeSearch(it) },
+                                onRemoveHistory = {
+                                    lib.removeSearch(it)
+                                    if (lib.searchHistory.isEmpty()) editing = false
+                                },
                                 hot = hot,
                                 hotErr = hotErr,
                                 seed = seed,

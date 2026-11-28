@@ -28,6 +28,7 @@ import androidx.media3.session.MediaSession
 import app.iduanju.MainActivity
 import app.iduanju.core.novel.NovelMedia
 import app.iduanju.core.util.NetGuard
+import app.iduanju.music.AppAudioArbiter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -99,6 +100,10 @@ object NovelPlayback {
     fun start(context: Context, queue: Queue, index: Int, media: NovelMedia) {
         val app = context.applicationContext.also { this.app = it }
         job?.cancel(); recovered = 0
+        AppAudioArbiter.claim(
+            if (queue.type == 4) AppAudioArbiter.Owner.VIDEO
+            else AppAudioArbiter.Owner.NOVEL_AUDIO,
+        )
         if (session == null) create(app)
         load(queue, index, media, 0, resolvedNow = true)
         if (queue.type == 4) app.stopService(Intent(app, NovelPlaybackService::class.java))
@@ -117,11 +122,18 @@ object NovelPlayback {
     }
 
     fun stop() {
+        val prev = state
         job?.cancel(); prefetch?.cancel(); upcoming = null; fresh = -1; recovered = 0
         state = null
         session?.release(); session = null
         exo?.release(); exo = null
         app?.let { it.stopService(Intent(it, NovelPlaybackService::class.java)) }
+        if (prev != null) {
+            AppAudioArbiter.release(
+                if (prev.video) AppAudioArbiter.Owner.VIDEO
+                else AppAudioArbiter.Owner.NOVEL_AUDIO,
+            )
+        }
     }
 
     private fun create(app: Context) {

@@ -399,6 +399,8 @@ struct MangaReaderView: View {
         .accessibilityIdentifier("manga.reader")
         .stvLocalColorScheme(.dark)
         .compatOnChange(of: vertical) { visible = [] }
+        .onAppear { MusicPlayerEngine.shared.enterImmersive("mangaReader") }
+        .onDisappear { MusicPlayerEngine.shared.leaveImmersive("mangaReader") }
     }
 
     private var verticalReader: some View {
@@ -494,6 +496,10 @@ struct MangaReaderView: View {
             }
             .padding(.horizontal, 14)
             Spacer()
+            ReaderMusicMiniBar()
+                .padding(.horizontal, 16)
+                .frame(maxWidth: 520)
+                .padding(.bottom, 8)
             HStack(spacing: 4) {
                 transport("backward.end.fill", "上一章", enabled: index > 0) { index -= 1 }
                 Text(pages.isEmpty ? "" : "\(min(page, pages.count - 1) + 1) / \(pages.count)").font(.system(size: 14, weight: .medium).monospacedDigit())

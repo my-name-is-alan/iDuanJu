@@ -1,10 +1,17 @@
 package app.iduanju.ui.components
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -40,6 +47,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.drawOutline
+import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
@@ -95,13 +104,325 @@ object DS {
 
 // MARK: surfaces
 
-/** `.card`: fill + 1 dp border; light mode adds the soft shadow. */
+/** `.card`: Yimeng hand-drawn dashed sketch card border + warm/obsidian surface. */
 @Composable
 fun Modifier.dsCard(radius: Dp = 20.dp): Modifier {
     val c = IdjThemeColors; val s = RoundedCornerShape(radius)
     return this
-        .then(if (!c.dark) Modifier.shadow(14.dp, s, ambientColor = c.shadowSoft, spotColor = Color.Black.copy(0.10f)) else Modifier)
-        .clip(s).background(c.card).border(1.dp, c.cardBorder, s)
+        .then(if (!c.dark) Modifier.shadow(12.dp, s, ambientColor = c.shadowSoft, spotColor = Color.Black.copy(0.08f)) else Modifier)
+        .clip(s).background(c.card)
+        .drawWithContent {
+            drawContent()
+            val sw = 1.15.dp.toPx()
+            val cr = radius.toPx()
+            drawRoundRect(
+                color = c.cardBorder,
+                topLeft = Offset(sw / 2f, sw / 2f),
+                size = androidx.compose.ui.geometry.Size(size.width - sw, size.height - sw),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(cr, cr),
+                style = androidx.compose.ui.graphics.drawscope.Stroke(
+                    width = sw,
+                    cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                    pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 4.dp.toPx())),
+                ),
+            )
+        }
+}
+
+/** Draws a dashed pill outline (Yimeng hand-drawn sketch rim). */
+internal fun Modifier.dashedCapsuleBorder(color: Color, width: Dp = 1.dp, dash: Dp = 5.dp, gap: Dp = 3.5.dp): Modifier =
+    this.drawWithContent {
+        drawContent()
+        val sw = width.toPx()
+        val r = size.height / 2f
+        drawRoundRect(
+            color = color,
+            topLeft = Offset(sw / 2f, sw / 2f),
+            size = androidx.compose.ui.geometry.Size(size.width - sw, size.height - sw),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(r, r),
+            style = androidx.compose.ui.graphics.drawscope.Stroke(
+                width = sw,
+                cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(dash.toPx(), gap.toPx())),
+            ),
+        )
+    }
+
+/** Draws Yimeng's organic hand-drawn scribble ellipse around a badge, icon well, or tab item. */
+internal fun androidx.compose.ui.graphics.drawscope.DrawScope.drawScribbleEllipse(
+    color: Color,
+    strokeWidth: Float,
+    seed: Int = 19,
+    inset: Float = 0f,
+) {
+    val cx = size.width / 2f
+    val cy = size.height / 2f
+    val rx = (size.width / 2f - inset).coerceAtLeast(1f)
+    val ry = (size.height / 2f - inset).coerceAtLeast(1f)
+    val path = androidx.compose.ui.graphics.Path()
+    val steps = 36
+    for (i in 0..steps) {
+        val t = i.toFloat() / steps
+        val a = (t * 2.0 * kotlin.math.PI * 1.08 - 0.35)
+        val wob = (1.0 + 0.045 * kotlin.math.sin(a * 3.0 + seed)).toFloat()
+        val x = cx + (kotlin.math.cos(a).toFloat() * wob) * rx
+        val y = cy + (kotlin.math.sin(a).toFloat() * wob) * ry
+        if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+    }
+    drawPath(path, color = color, style = androidx.compose.ui.graphics.drawscope.Stroke(width = strokeWidth, cap = androidx.compose.ui.graphics.StrokeCap.Round))
+}
+
+@Composable
+internal fun DoodleSparkle(color: Color, size: Dp = 11.dp, modifier: Modifier = Modifier) {
+    androidx.compose.foundation.Canvas(modifier.size(size)) {
+        val cx = this.size.width / 2f
+        val cy = this.size.height / 2f
+        val rx = this.size.width * 0.48f
+        val ry = this.size.height * 0.48f
+        val p = androidx.compose.ui.graphics.Path().apply {
+            moveTo(cx, cy - ry)
+            quadraticTo(cx + rx * 0.14f, cy - ry * 0.14f, cx + rx, cy)
+            quadraticTo(cx + rx * 0.14f, cy + ry * 0.14f, cx, cy + ry)
+            quadraticTo(cx - rx * 0.14f, cy + ry * 0.14f, cx - rx, cy)
+            quadraticTo(cx - rx * 0.14f, cy - ry * 0.14f, cx, cy - ry)
+            close()
+        }
+        drawPath(p, color = color)
+    }
+}
+
+@Composable
+fun DoodleCrayonWave(
+    color: Color,
+    waves: Int = 3,
+    modifier: Modifier = Modifier,
+    strokeWidth: Dp = 1.9.dp,
+    durationMs: Int = 2600,
+    active: Boolean = true,
+) {
+    val phase = if (active) {
+        val transition = rememberInfiniteTransition(label = "crayonWave")
+        val p by transition.animateFloat(
+            initialValue = 0f,
+            targetValue = (2.0 * kotlin.math.PI).toFloat(),
+            animationSpec = infiniteRepeatable(animation = tween(durationMs, easing = LinearEasing)),
+            label = "wavePhase",
+        )
+        p
+    } else 0f
+    androidx.compose.foundation.Canvas(modifier) {
+        val count = (waves * 14).coerceAtLeast(24)
+        val path = androidx.compose.ui.graphics.Path()
+        for (i in 0..count) {
+            val t = i.toFloat() / count
+            val x = t * size.width
+            val y = size.height / 2f + kotlin.math.sin(t * kotlin.math.PI.toFloat() * 2f * waves - phase) * (size.height * 0.36f)
+            if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+        }
+        val sw = strokeWidth.toPx()
+        translate(0.7.dp.toPx(), 0.8.dp.toPx()) {
+            drawPath(
+                path,
+                color = color.copy(alpha = color.alpha * 0.32f),
+                style = androidx.compose.ui.graphics.drawscope.Stroke(
+                    width = sw * 0.85f,
+                    cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                    join = androidx.compose.ui.graphics.StrokeJoin.Round,
+                ),
+            )
+        }
+        drawPath(
+            path,
+            color = color,
+            style = androidx.compose.ui.graphics.drawscope.Stroke(
+                width = sw,
+                cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                join = androidx.compose.ui.graphics.StrokeJoin.Round,
+            ),
+        )
+    }
+}
+
+/** Unified Yimeng hand-drawn double-pass crayon tab glyphs (1:1 with iOS `YMTabGlyph`). */
+enum class YMTabGlyph {
+    HOME, TVBOX, DISCOVER, MUSIC, PROFILE, SEARCH;
+
+    fun subpaths(s: Float): List<androidx.compose.ui.graphics.Path> = when (this) {
+        HOME -> listOf(
+            androidx.compose.ui.graphics.Path().apply {
+                moveTo(0.50f * s, 0.14f * s)
+                lineTo(0.88f * s, 0.46f * s)
+                lineTo(0.78f * s, 0.46f * s)
+                lineTo(0.78f * s, 0.86f * s)
+                lineTo(0.56f * s, 0.86f * s)
+                lineTo(0.56f * s, 0.62f * s)
+                lineTo(0.44f * s, 0.62f * s)
+                lineTo(0.44f * s, 0.86f * s)
+                lineTo(0.22f * s, 0.86f * s)
+                lineTo(0.22f * s, 0.46f * s)
+                lineTo(0.12f * s, 0.46f * s)
+                close()
+            },
+        )
+        TVBOX -> listOf(
+            androidx.compose.ui.graphics.Path().apply {
+                moveTo(0.34f * s, 0.14f * s); lineTo(0.50f * s, 0.30f * s)
+            },
+            androidx.compose.ui.graphics.Path().apply {
+                moveTo(0.66f * s, 0.14f * s); lineTo(0.50f * s, 0.30f * s)
+            },
+            androidx.compose.ui.graphics.Path().apply {
+                addRoundRect(
+                    androidx.compose.ui.geometry.RoundRect(
+                        left = 0.14f * s, top = 0.30f * s, right = 0.86f * s, bottom = 0.84f * s,
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(0.14f * s, 0.14f * s),
+                    ),
+                )
+            },
+            androidx.compose.ui.graphics.Path().apply {
+                moveTo(0.44f * s, 0.47f * s)
+                lineTo(0.62f * s, 0.57f * s)
+                lineTo(0.44f * s, 0.67f * s)
+                close()
+            },
+        )
+        DISCOVER -> {
+            val r = androidx.compose.ui.geometry.CornerRadius(0.08f * s, 0.08f * s)
+            listOf(
+                androidx.compose.ui.graphics.Path().apply { addRoundRect(androidx.compose.ui.geometry.RoundRect(0.16f * s, 0.16f * s, 0.44f * s, 0.44f * s, r)) },
+                androidx.compose.ui.graphics.Path().apply { addRoundRect(androidx.compose.ui.geometry.RoundRect(0.56f * s, 0.16f * s, 0.84f * s, 0.44f * s, r)) },
+                androidx.compose.ui.graphics.Path().apply { addRoundRect(androidx.compose.ui.geometry.RoundRect(0.16f * s, 0.56f * s, 0.44f * s, 0.84f * s, r)) },
+                androidx.compose.ui.graphics.Path().apply { addRoundRect(androidx.compose.ui.geometry.RoundRect(0.56f * s, 0.56f * s, 0.84f * s, 0.84f * s, r)) },
+            )
+        }
+        MUSIC -> listOf(
+            androidx.compose.ui.graphics.Path().apply { addOval(androidx.compose.ui.geometry.Rect(0.17f * s, 0.63f * s, 0.39f * s, 0.81f * s)) },
+            androidx.compose.ui.graphics.Path().apply { addOval(androidx.compose.ui.geometry.Rect(0.55f * s, 0.56f * s, 0.77f * s, 0.74f * s)) },
+            androidx.compose.ui.graphics.Path().apply {
+                moveTo(0.38f * s, 0.71f * s)
+                lineTo(0.38f * s, 0.22f * s)
+                lineTo(0.76f * s, 0.16f * s)
+                lineTo(0.76f * s, 0.64f * s)
+            },
+        )
+        PROFILE -> listOf(
+            androidx.compose.ui.graphics.Path().apply { addOval(androidx.compose.ui.geometry.Rect(0.32f * s, 0.13f * s, 0.68f * s, 0.49f * s)) },
+            androidx.compose.ui.graphics.Path().apply {
+                moveTo(0.16f * s, 0.87f * s)
+                quadraticTo(0.50f * s, 0.49f * s, 0.84f * s, 0.87f * s)
+            },
+        )
+        SEARCH -> listOf(
+            androidx.compose.ui.graphics.Path().apply { addOval(androidx.compose.ui.geometry.Rect(0.18f * s, 0.14f * s, 0.70f * s, 0.66f * s)) },
+            androidx.compose.ui.graphics.Path().apply {
+                moveTo(0.62f * s, 0.58f * s)
+                lineTo(0.86f * s, 0.84f * s)
+            },
+        )
+    }
+}
+
+/** Double-pass hand-drawn crayon icon with animated stroke draw-in when activated. */
+@Composable
+fun YMTabIcon(glyph: YMTabGlyph, size: Dp = 21.dp, active: Boolean = false, modifier: Modifier = Modifier) {
+    val c = IdjThemeColors
+    val ink = if (active) c.accent else c.text.copy(alpha = 0.68f)
+    val drawn = remember { Animatable(1f) }
+    var wasActive by remember { mutableStateOf(active) }
+    LaunchedEffect(active) {
+        if (active && !wasActive) {
+            drawn.snapTo(0.08f)
+            drawn.animateTo(1f, tween(380, easing = FastOutSlowInEasing))
+        } else if (!active) {
+            drawn.snapTo(1f)
+        }
+        wasActive = active
+    }
+    val scale by animateFloatAsState(
+        targetValue = if (active) 1.04f else 1f,
+        animationSpec = spring(dampingRatio = 0.68f, stiffness = 420f),
+        label = "ymTabScale",
+    )
+    androidx.compose.foundation.Canvas(modifier.size(size).scale(scale)) {
+        val s = this.size.minDimension
+        val subpaths = glyph.subpaths(s)
+        val progress = drawn.value.coerceIn(0f, 1f)
+        val drawList: List<androidx.compose.ui.graphics.Path> = if (progress >= 0.999f) {
+            subpaths
+        } else {
+            val pm = androidx.compose.ui.graphics.PathMeasure()
+            val lengths = subpaths.map { p -> pm.setPath(p, false); pm.length }
+            var remaining = lengths.sum() * progress
+            buildList {
+                subpaths.forEachIndexed { idx, p ->
+                    if (remaining <= 0f) return@forEachIndexed
+                    val len = lengths[idx]
+                    if (remaining >= len) {
+                        add(p)
+                        remaining -= len
+                    } else {
+                        pm.setPath(p, false)
+                        val seg = androidx.compose.ui.graphics.Path()
+                        pm.getSegment(0f, remaining, seg, true)
+                        add(seg)
+                        remaining = 0f
+                    }
+                }
+            }
+        }
+        val lw = (if (active) 1.85.dp else 1.55.dp).toPx()
+        val offX = 0.65.dp.toPx()
+        val offY = 0.7.dp.toPx()
+        val secondStyle = androidx.compose.ui.graphics.drawscope.Stroke(
+            width = lw * 0.82f,
+            cap = androidx.compose.ui.graphics.StrokeCap.Round,
+            join = androidx.compose.ui.graphics.StrokeJoin.Round,
+        )
+        val mainStyle = androidx.compose.ui.graphics.drawscope.Stroke(
+            width = lw,
+            cap = androidx.compose.ui.graphics.StrokeCap.Round,
+            join = androidx.compose.ui.graphics.StrokeJoin.Round,
+        )
+        translate(offX, offY) {
+            drawList.forEach { p -> drawPath(p, color = ink.copy(alpha = 0.32f), style = secondStyle) }
+        }
+        drawList.forEach { p -> drawPath(p, color = ink, style = mainStyle) }
+    }
+}
+
+/** Crystal-clear Yimeng floating dock surface: deep obsidian dark / warm cream light + dashed sketch rim. */
+@Composable
+fun Modifier.ymDockSurface(shape: Shape = CircleShape, shadowElevation: Dp = 16.dp): Modifier {
+    val c = IdjThemeColors
+    val fill = if (c.dark) Color(0xE60E0E12) else Color(0xF2FAF9F6)
+    val rim = if (c.dark) Color.White.copy(alpha = 0.14f) else Color.Black.copy(alpha = 0.09f)
+    val shadowCol = Color.Black.copy(alpha = if (c.dark) 0.45f else 0.12f)
+    return this
+        .shadow(shadowElevation, shape, ambientColor = shadowCol, spotColor = shadowCol)
+        .clip(shape)
+        .background(fill)
+        .drawWithContent {
+            drawContent()
+            val sw = 1.dp.toPx()
+            val innerSize = androidx.compose.ui.geometry.Size(
+                (size.width - sw).coerceAtLeast(1f),
+                (size.height - sw).coerceAtLeast(1f),
+            )
+            val outline = shape.createOutline(innerSize, layoutDirection, this)
+            translate(sw / 2f, sw / 2f) {
+                drawOutline(
+                    outline = outline,
+                    color = rim,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(
+                        width = sw,
+                        cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                        pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(
+                            floatArrayOf(6.dp.toPx(), 4.dp.toPx()),
+                        ),
+                    ),
+                )
+            }
+        }
 }
 
 /** Floating glass bar (tab bar, sticky strip, play bar). Real blur on API 31+ through Haze. */
@@ -232,8 +553,31 @@ fun <T> UnderlineTabs(items: List<T>, selected: T, label: (T) -> String, small: 
                         .testTag("tabs.${label(it)}"))
             }
         }
-        if (target != null) Box(Modifier.align(Alignment.BottomStart).offset(x = x, y = if (small) 0.dp else 0.dp)
-            .size(uw, if (small) 3.dp else 4.dp).clip(CircleShape).background(c.accent))
+        val strokeDrawn = remember { Animatable(1f) }
+        LaunchedEffect(idx) {
+            strokeDrawn.snapTo(0.05f)
+            strokeDrawn.animateTo(1f, tween(420, easing = FastOutSlowInEasing))
+        }
+        if (target != null) androidx.compose.foundation.Canvas(
+            Modifier.align(Alignment.BottomStart).offset(x = x, y = 0.dp).size(if (small) 26.dp else 34.dp, 6.dp),
+        ) {
+            val fullPath = androidx.compose.ui.graphics.Path().apply {
+                moveTo(2f, size.height * 0.72f)
+                quadraticTo(size.width * 0.5f, size.height * 0.12f, size.width - 2f, size.height * 0.52f)
+            }
+            val pm = androidx.compose.ui.graphics.PathMeasure()
+            pm.setPath(fullPath, false)
+            val seg = androidx.compose.ui.graphics.Path()
+            pm.getSegment(0f, pm.length * strokeDrawn.value.coerceIn(0f, 1f), seg, true)
+            drawPath(
+                path = seg,
+                color = c.accent,
+                style = androidx.compose.ui.graphics.drawscope.Stroke(
+                    width = (if (small) 2.5.dp else 3.2.dp).toPx(),
+                    cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                ),
+            )
+        }
     }
 }
 
@@ -249,68 +593,51 @@ fun <T> SegmentedTabs(items: List<T>, selected: T, label: (T) -> String, onSelec
     val c = IdjThemeColors
     val liquid = GlassStylePref.style == GlassStyle.LIQUID
     val idx = items.indexOf(selected).coerceAtLeast(0)
-    val trackShape = RoundedCornerShape(14.dp)
-    val thumbShape = RoundedCornerShape(11.dp)
-    // Dark mode: the track *darkens* what is behind it (smoked glass) with only a hairline sheen and rim — stacking
-    // white fills / sheens / rims here used to add up to a milky-white bar on the dark page.
-    val track = if (c.dark) {
-        Modifier.clip(trackShape)
-            .background(Color.Black.copy(alpha = if (liquid) 0.26f else 0.32f))
-            .background(Brush.verticalGradient(0f to Color.White.copy(alpha = 0.05f), 0.35f to Color.Transparent))
-            .border(0.8.dp, Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.14f), Color.White.copy(alpha = 0.03f))), trackShape)
-    } else if (liquid) {
-        Modifier.clip(trackShape)
-            .background(Color.Black.copy(alpha = 0.035f))
-            .background(liquidSheenBrush(false))
-            .border(1.dp, liquidRimBrush(false), trackShape)
-    } else {
-        Modifier.clip(trackShape).background(c.glass).border(1.dp, c.hairline, trackShape)
-    }
-    BoxWithConstraints(modifier.fillMaxWidth().height(scaledHeight(40.dp)).then(track).padding(3.dp)) {
+    val trackShape = CircleShape
+    val thumbShape = CircleShape
+    val track = Modifier.clip(trackShape).background(c.glass).dashedCapsuleBorder(c.glassBorder, width = 1.dp, dash = 5.dp, gap = 3.5.dp)
+    BoxWithConstraints(modifier.fillMaxWidth().height(scaledHeight(40.dp)).then(track).padding(3.5.dp)) {
         val w = maxWidth / items.size.coerceAtLeast(1)
         val x by animateDpAsState(w * idx, DS.select(), label = "seg")
         Box(Modifier.offset(x = x).width(w).fillMaxHeight()
-            .then(if (!c.dark) Modifier.shadow(if (liquid) 2.dp else 3.dp, thumbShape, ambientColor = c.shadowThumb, spotColor = c.shadowThumb) else Modifier)
-            .then(when {
-                // a clear glass lens with a crisp top highlight — never a frosted white slab
-                c.dark -> Modifier.clip(thumbShape)
-                    .background(Color.White.copy(alpha = 0.10f))
-                    .background(Brush.verticalGradient(0f to Color.White.copy(alpha = 0.12f), 0.5f to Color.Transparent))
-                    .border(0.8.dp, Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.34f), Color.White.copy(alpha = 0.06f))), thumbShape)
-                liquid -> Modifier.glassPill(thumbShape, selected = true, neutralSelected = true)
-                else -> Modifier.clip(thumbShape).background(c.thumb)
-            }))
+            .then(if (!c.dark) Modifier.shadow(2.dp, thumbShape, ambientColor = c.shadowThumb, spotColor = c.shadowThumb) else Modifier)
+            .clip(thumbShape)
+            .background(c.text))
         Row(Modifier.fillMaxSize()) {
             items.forEachIndexed { i, it ->
                 val on = i == idx
-                val col by animateColorAsState(if (on) c.text else c.secondary, label = "segc")
+                val col by animateColorAsState(if (on) c.bg else c.secondary, label = "segc")
                 Box(Modifier.weight(1f).fillMaxHeight().selectable(on, remember { MutableInteractionSource() }, null, role = Role.Tab) { onSelect(it) }
                     .semantics { contentDescription = "seg.${label(it)}" }, contentAlignment = Alignment.Center) {
-                    Text(label(it), color = col, fontSize = 14.sp, fontWeight = if (on) FontWeight.SemiBold else FontWeight.Medium, maxLines = 1)
+                    Text(label(it), color = col, fontSize = 13.5.sp, fontWeight = if (on) FontWeight.Bold else FontWeight.Medium, maxLines = 1)
                 }
             }
         }
     }
 }
 
-// MARK: level 3 — tone chips (`.chip`): 32 dp, padding 14, font 14
+// MARK: level 3 — tone chips (`.chip`): Yimeng crisp monochrome solid active capsule + subtle accent rim
 
 @Composable
 fun ToneChip(title: String, on: Boolean, neutral: Boolean = false, small: Boolean = false, count: Int? = null, enabled: Boolean = true, onClick: () -> Unit) {
     val c = IdjThemeColors
-    val fill by animateColorAsState(if (on) (if (neutral) c.thumb else c.accentSoft) else c.glass, label = "chip")
-    val ink by animateColorAsState(if (on) (if (neutral) c.text else c.accent) else c.secondary, label = "chipInk")
+    val fill by animateColorAsState(if (on) c.text else c.glass, label = "chip")
+    val ink by animateColorAsState(if (on) c.bg else c.secondary, label = "chipInk")
+    val borderCol = when {
+        on && !neutral -> c.accent.copy(alpha = 0.55f)
+        on -> Color.Transparent
+        else -> c.hairline
+    }
     Row(Modifier
         .graphicsLayer { alpha = if (enabled) 1f else 0.38f }
-        .then(if (on && neutral && !c.dark) Modifier.shadow(3.dp, CircleShape, ambientColor = c.shadowThumb, spotColor = c.shadowThumb) else Modifier)
         .clip(CircleShape).background(fill)
-        .then(if (on && !neutral) Modifier.border(1.dp, c.accentLine, CircleShape) else Modifier)
+        .then(if (on) Modifier.border(0.9.dp, borderCol, CircleShape) else Modifier.dashedCapsuleBorder(c.hairline, width = 0.9.dp, dash = 4.5.dp, gap = 3.5.dp))
         .pressClick(0.97f, enabled, onClick = onClick)
         .semantics { selected = on }
         .testTag("chip.$title")
         .heightIn(min = if (small) 28.dp else 32.dp).padding(horizontal = if (small) 12.dp else 14.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-        Text(title, color = ink, fontSize = if (small) 13.sp else 14.sp, fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1)
+        Text(title, color = ink, fontSize = if (small) 12.5.sp else 13.5.sp, fontWeight = if (on) FontWeight.Bold else FontWeight.Medium, maxLines = 1)
         if (count != null) Text("$count", color = ink.copy(alpha = ink.alpha * 0.72f), fontSize = 12.sp, fontWeight = FontWeight.Medium)
     }
 }
@@ -373,20 +700,18 @@ fun CapsuleButton(title: String, icon: ImageVector? = null, trailing: ImageVecto
 /** [Play]: the primary 播放 action — the same saturated brand-blue capsule in light and dark (never theme-inverted). */
 enum class PillTone { Accent, Ink, White, Play }
 
-private val PlayGradient = Brush.linearGradient(listOf(Color(0xFF4A90FF), Color(0xFF2B62EC)))
+private val PlayGradient = Brush.linearGradient(listOf(Color(0xFFC8F542), Color(0xFFA8DF28)))
 
 /** `.btn`: 48 dp accent / ink / white / play capsule (32 dp small). */
 @Composable
 fun PillButton(title: String, modifier: Modifier = Modifier, icon: ImageVector? = null, tone: PillTone = PillTone.Accent, small: Boolean = false,
                height: Dp? = null, enabled: Boolean = true, onClick: () -> Unit) {
     val c = IdjThemeColors
-    val bg = when (tone) { PillTone.Accent -> c.accent; PillTone.Ink -> c.text; PillTone.White -> Color.White; PillTone.Play -> Color(0xFF3577F5) }
-    val fg = when (tone) { PillTone.Accent -> c.onAccent; PillTone.Ink -> c.bg; PillTone.White -> Color(0xFF111317); PillTone.Play -> Color.White }
-    val fill = if (tone == PillTone.Play) Modifier
-        .shadow(if (c.dark) 0.dp else 10.dp, CircleShape, ambientColor = Color(0xFF2B62EC), spotColor = Color(0xFF2B62EC))
+    val bg = when (tone) { PillTone.Accent -> c.accent; PillTone.Ink -> c.text; PillTone.White -> Color.White; PillTone.Play -> c.accent }
+    val fg = when (tone) { PillTone.Accent -> c.onAccent; PillTone.Ink -> c.bg; PillTone.White -> Color(0xFF0A0A0C); PillTone.Play -> c.onAccent }
+    val fill = if (tone == PillTone.Play && c.dark) Modifier
         .clip(CircleShape).background(PlayGradient)
-        // crisp glass rim: bright on top, fading out toward the bottom
-        .border(1.dp, Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.32f), Color.White.copy(alpha = 0.04f))), CircleShape)
+        .border(1.dp, Color.White.copy(alpha = 0.25f), CircleShape)
     else Modifier.clip(CircleShape).background(bg)
     Row(modifier.height(height ?: if (small) 32.dp else 48.dp).then(fill).pressClick(0.98f, enabled, title, onClick)
         .padding(horizontal = if (small) 14.dp else 22.dp), verticalAlignment = Alignment.CenterVertically,
@@ -421,7 +746,7 @@ fun DSNavBar(title: String, modifier: Modifier = Modifier, titleAlpha: Float = 1
 @Composable
 fun DSSearchBar(placeholder: String = "搜索你想看的作品", modifier: Modifier = Modifier, ink: Color? = null, trailing: @Composable RowScope.() -> Unit = {}) {
     val c = IdjThemeColors
-    Row(modifier.fillMaxWidth().height(46.dp).clip(CircleShape).background(c.glass).border(1.dp, c.glassBorder, CircleShape).padding(horizontal = 16.dp),
+    Row(modifier.fillMaxWidth().height(46.dp).clip(CircleShape).background(c.glass).dashedCapsuleBorder(c.glassBorder, width = 1.dp, dash = 5.5.dp, gap = 4.dp).padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         Icon(Icons.Rounded.Search, null, Modifier.size(20.dp), tint = ink ?: c.secondary)
         Text(placeholder, Modifier.weight(1f), color = ink ?: c.secondary, fontSize = 16.sp, maxLines = 1)
@@ -433,9 +758,19 @@ fun DSSearchBar(placeholder: String = "搜索你想看的作品", modifier: Modi
 @Composable
 fun SectionHeader2(title: String, note: String? = null, inset: Dp = 16.dp, modifier: Modifier = Modifier, trailing: @Composable () -> Unit = {}) {
     val c = IdjThemeColors
-    Row(modifier.fillMaxWidth().padding(horizontal = inset), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(title, color = c.text, fontSize = 19.sp, fontWeight = FontWeight.Bold)
-        if (note != null) Text(note, color = c.secondary, fontSize = 13.sp, modifier = Modifier.padding(bottom = 2.dp))
+    Row(modifier.fillMaxWidth().padding(horizontal = inset), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        DoodleSparkle(c.accent, size = 11.dp)
+        Column {
+            Text(title, color = c.text, fontSize = 19.sp, fontWeight = FontWeight.ExtraBold)
+            androidx.compose.foundation.Canvas(Modifier.size(24.dp, 4.dp)) {
+                val p = androidx.compose.ui.graphics.Path().apply {
+                    moveTo(1f, size.height * 0.7f)
+                    quadraticTo(size.width * 0.5f, size.height * 0.1f, size.width - 1f, size.height * 0.5f)
+                }
+                drawPath(p, color = c.accent.copy(alpha = 0.65f), style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round))
+            }
+        }
+        if (note != null) Text(note, color = c.secondary, fontSize = 13.sp, modifier = Modifier.padding(start = 2.dp))
         Spacer(Modifier.weight(1f))
         trailing()
     }
@@ -492,7 +827,14 @@ fun DSProgressBar(value: Float, modifier: Modifier = Modifier) {
 @Composable
 fun IconWell(icon: ImageVector, size: Dp = 34.dp, corner: Dp? = null) {
     val c = IdjThemeColors
-    Box(Modifier.size(size).clip(RoundedCornerShape(corner ?: (size / 2))).background(c.accentSoft), contentAlignment = Alignment.Center) {
+    Box(
+        Modifier.size(size).clip(RoundedCornerShape(corner ?: (size / 2))).background(c.accentSoft)
+            .drawWithContent {
+                drawContent()
+                if (corner == null) drawScribbleEllipse(c.accent.copy(alpha = 0.68f), 1.4.dp.toPx(), seed = 17, inset = 1.dp.toPx())
+            },
+        contentAlignment = Alignment.Center,
+    ) {
         Icon(icon, null, Modifier.size(size * 0.5f), tint = c.accent)
     }
 }
@@ -514,11 +856,46 @@ fun PosterArt(url: String, modifier: Modifier = Modifier, corner: Dp = 12.dp, ra
         AsyncImage(url, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
         Box(Modifier.matchParentSize().background(Brush.verticalGradient(0.46f to Color.Transparent, 1f to Color.Black.copy(0.62f))))
         if (rank != null) {
-            val medal = when (rank) { 1 -> Color(0xFFFFC740); 2 -> Color(0xFFAEBBD6); 3 -> Color(0xFFDB8C52); else -> Color.Black }
-            val off = with(LocalDensity.current) { 2.dp.toPx() }
-            Text("$rank", Modifier.align(Alignment.TopStart).padding(start = 7.dp), color = Color.White, fontSize = 36.sp, fontWeight = FontWeight.Black,
-                fontStyle = FontStyle.Italic, style = androidx.compose.ui.text.TextStyle(lineHeight = 36.sp, shadow = androidx.compose.ui.graphics.Shadow(medal, Offset(off, off), 0f),
-                    platformStyle = androidx.compose.ui.text.PlatformTextStyle(includeFontPadding = false)))
+            val medal = when (rank) { 1 -> Color(0xFFF2B705); 2 -> Color(0xFFC7D1E6); 3 -> Color(0xFFDB8C52); else -> Color.White }
+            Column(
+                Modifier.align(Alignment.TopStart).padding(start = 6.dp, top = if (rank == 1) 4.dp else 6.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                if (rank == 1) {
+                    androidx.compose.foundation.Canvas(Modifier.size(16.dp, 9.dp).graphicsLayer { rotationZ = -8f }) {
+                        val p = androidx.compose.ui.graphics.Path().apply {
+                            moveTo(1f, size.height - 1f)
+                            lineTo(size.width * 0.14f, size.height * 0.25f)
+                            lineTo(size.width * 0.36f, size.height * 0.62f)
+                            lineTo(size.width * 0.5f, 0.5f)
+                            lineTo(size.width * 0.64f, size.height * 0.62f)
+                            lineTo(size.width * 0.86f, size.height * 0.25f)
+                            lineTo(size.width - 1f, size.height - 1f)
+                            close()
+                        }
+                        drawPath(p, color = medal)
+                    }
+                }
+                Box(
+                    Modifier
+                        .size(if (rank <= 3) 27.dp else 23.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = if (rank <= 3) 0.68f else 0.52f))
+                        .drawWithContent {
+                            drawContent()
+                            if (rank <= 3) drawScribbleEllipse(medal, 1.5.dp.toPx(), seed = rank * 29, inset = 1.dp.toPx())
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        "$rank",
+                        color = medal,
+                        fontSize = if (rank <= 3) 13.5.sp else 12.sp,
+                        fontWeight = FontWeight.Black,
+                        maxLines = 1,
+                    )
+                }
+            }
         }
         if (!badge.isNullOrEmpty()) Text(badge, Modifier.align(Alignment.BottomStart).padding(8.dp), color = Color.White.copy(0.9f), fontSize = 11.sp, fontWeight = FontWeight.Medium)
     }

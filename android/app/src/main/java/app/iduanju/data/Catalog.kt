@@ -118,12 +118,12 @@ object Catalog {
         return out
     }
 
-    fun resolve(ep: HGEpisode): HGResolvedVideo = when {
+    fun resolve(ep: HGEpisode, force: Boolean = false): HGResolvedVideo = when {
         TVBoxId.isTVBox(ep.vid) -> IdjApp.instance.tvbox.resolve(ep)
         isCMS(ep.vid) -> MacCMS.resolve(cmsSite(ep.vid), ep)
         PluginVideo.isPlugin(ep.vid) -> friendly { plugin(ep.vid).resolve(ep) }
         app.iduanju.core.huangguo.HuangguoClient.isHuangguo(ep.vid) -> IdjApp.instance.huangguo.resolve(ep)
         TGVideo.isTG(ep.vid) -> TGVideo.resolve(IdjApp.instance.tg.client, ep)
-        else -> IdjApp.instance.hongguo.resolve(ep.vid)
+        else -> IdjApp.instance.hongguo.resolve(ep.vid, force)
     }
 }

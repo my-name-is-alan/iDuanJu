@@ -20,10 +20,22 @@ final class SourceGate: ObservableObject {
     @Published private(set) var huangguo: Bool
     /// Persisted custom ordering of Home top-bar sources (keys from `HomeSource.key`). Empty = default order.
     @Published private(set) var homeOrder: [String]
+    /// Sources folded off the Home top tab bar (still enabled for Search & 1-tap accessible in the Channel sheet).
+    @Published private(set) var homeHidden: Set<String>
+    /// User-configurable visibility for Home feature tabs (频道 / 漫画 / 小说 / 音乐). Default ON.
+    @Published private(set) var showChannelsTab: Bool
+    @Published private(set) var showMangaTab: Bool
+    @Published private(set) var showNovelTab: Bool
+    @Published private(set) var showMusicTab: Bool
     /// Bumped after every state mutation so views observing `$revision` always read post-mutation values.
     @Published private(set) var revision = 0
     private let d = UserDefaults.standard
     private static let homeOrderKey = "stv.home.sourceOrder"
+    private static let homeHiddenKey = "stv.home.hiddenSources"
+    private static let showChannelsKey = "stv.home.showChannels"
+    private static let showMangaKey = "stv.home.showManga"
+    private static let showNovelKey = "stv.home.showNovel"
+    private static let showMusicKey = "stv.home.showMusic"
 
     private init() {
         let raw = d.stringArray(forKey: "stv.sources.enabled") ?? []
@@ -34,6 +46,11 @@ final class SourceGate: ObservableObject {
         adultManga = d.bool(forKey: "stv.sources.adultManga")
         huangguo = d.bool(forKey: "stv.sources.huangguo")
         homeOrder = d.stringArray(forKey: Self.homeOrderKey) ?? []
+        homeHidden = Set(d.stringArray(forKey: Self.homeHiddenKey) ?? []).subtracting(["builtin:hongguo"])
+        showChannelsTab = (d.object(forKey: Self.showChannelsKey) as? Bool) ?? true
+        showMangaTab = (d.object(forKey: Self.showMangaKey) as? Bool) ?? true
+        showNovelTab = (d.object(forKey: Self.showNovelKey) as? Bool) ?? true
+        showMusicTab = (d.object(forKey: Self.showMusicKey) as? Bool) ?? true
         #if DEBUG
         // Simulator screenshot hook: STV_SOURCES=jable,missav enables those sites for this run.
         if let e = ProcessInfo.processInfo.environment["STV_SOURCES"], !e.isEmpty {
@@ -77,6 +94,10 @@ final class SourceGate: ObservableObject {
     func setHuangguo(_ on: Bool) { huangguo = on; d.set(on, forKey: "stv.sources.huangguo"); revision += 1 }
     func setAdultChannels(_ on: Bool) { adultChannels = on; d.set(on, forKey: "stv.sources.adultChannels"); revision += 1 }
     func setAdultManga(_ on: Bool) { adultManga = on; d.set(on, forKey: "stv.sources.adultManga"); revision += 1 }
+    func setShowChannelsTab(_ on: Bool) { showChannelsTab = on; d.set(on, forKey: Self.showChannelsKey); revision += 1 }
+    func setShowMangaTab(_ on: Bool) { showMangaTab = on; d.set(on, forKey: Self.showMangaKey); revision += 1 }
+    func setShowNovelTab(_ on: Bool) { showNovelTab = on; d.set(on, forKey: Self.showNovelKey); revision += 1 }
+    func setShowMusicTab(_ on: Bool) { showMusicTab = on; d.set(on, forKey: Self.showMusicKey); revision += 1 }
 
     func set(_ s: DramaSource, on: Bool) {
         if let pid = s.pluginID {
@@ -104,10 +125,45 @@ final class SourceGate: ObservableObject {
         adultManga = d.bool(forKey: "stv.sources.adultManga")
         huangguo = d.bool(forKey: "stv.sources.huangguo")
         homeOrder = d.stringArray(forKey: Self.homeOrderKey) ?? []
+        homeHidden = Set(d.stringArray(forKey: Self.homeHiddenKey) ?? []).subtracting(["builtin:hongguo"])
+        showChannelsTab = (d.object(forKey: Self.showChannelsKey) as? Bool) ?? true
+        showMangaTab = (d.object(forKey: Self.showMangaKey) as? Bool) ?? true
+        showNovelTab = (d.object(forKey: Self.showNovelKey) as? Bool) ?? true
+        showMusicTab = (d.object(forKey: Self.showMusicKey) as? Bool) ?? true
         revision += 1
     }
 
-    // MARK: Home source ordering
+    // MARK: Home source ordering & folding
+
+    func isHiddenOnHome(_ key: String) -> Bool {
+        key != "builtin:hongguo" && homeHidden.contains(key)
+    }
+
+    func setHomeHidden(_ key: String, hidden: Bool) {
+        guard key != "builtin:hongguo" else { return }
+        if hidden { homeHidden.insert(key) } else { homeHidden.remove(key) }
+        d.set(homeHidden.sorted(), forKey: Self.homeHiddenKey)
+        revision += 1
+    }
+
+    func setHomeHiddenBatch(_ keys: [String], hidden: Bool) {
+        let valid = keys.filter { $0 != "builtin:hongguo" }
+        guard !valid.isEmpty else { return }
+        if hidden {
+            homeHidden.formUnion(valid)
+        } else {
+            homeHidden.subtract(valid)
+        }
+        d.set(homeHidden.sorted(), forKey: Self.homeHiddenKey)
+        revision += 1
+    }
+
+    func clearHomeHidden() {
+        guard !homeHidden.isEmpty else { return }
+        homeHidden.removeAll()
+        d.removeObject(forKey: Self.homeHiddenKey)
+        revision += 1
+    }
 
     /// Applies persisted custom order while keeping newly enabled sources appended in their natural order
     /// and preserving positions of temporarily hidden sources in `homeOrder`.

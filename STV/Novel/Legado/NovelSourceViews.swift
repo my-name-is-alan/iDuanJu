@@ -1,21 +1,27 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// 书源管理: import 「阅读」(Legado) JSON sources from a URL, the clipboard or a file; toggle / delete.
+/// 书源管理: import Legado JSON / `.js` sources, search/filter, batch-check, debug, purify rules, edit, export.
 struct NovelSourcesView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var store = LegadoSourceStore.shared
     @State private var importing = false
     @State private var login: LegadoSource?
+    @State private var debugging: LegadoSource?
+    @State private var editing: LegadoSource?
+    @State private var showChecker = false
+    @State private var showReplaceRules = false
+    @State private var query = ""
     @State private var filter: Filter = .all
 
-    enum Filter: String, CaseIterable { case all = "全部", on = "已启用", login = "需登录", unsupported = "不支持" }
+    enum Filter: String, CaseIterable {
+        case all = "全部", on = "已启用", login = "需登录", js = "JS源", failed = "校验失败", unsupported = "不支持"
+    }
 
-    /// One pass over the sources per change: classification reads the login state (JSON per source), and it used to run
-    /// five times over the whole list in every body.
     private struct Board {
         var counts: [Filter: Int] = [:]
         var loggedIn: Set<String> = []
+        var checks: [String: LegadoTools.CheckResult] = [:]
         var enabled = 0
         var total = 0
     }
@@ -24,28 +30,38 @@ struct NovelSourcesView: View {
     private func classify() {
         var b = Board()
         b.total = store.sources.count
+        b.checks = LegadoTools.allChecks()
         for s in store.sources {
             let logged = s.hasLogin && LegadoSourceState.isLoggedIn(s.bookSourceUrl)
             if logged { b.loggedIn.insert(s.id) }
             b.counts[.all, default: 0] += 1
             if s.isOn && s.supported { b.enabled += 1; b.counts[.on, default: 0] += 1 }
             if s.hasLogin && !logged { b.counts[.login, default: 0] += 1 }
+            if s.isJsSource { b.counts[.js, default: 0] += 1 }
+            if let chk = b.checks[s.id], chk.status != .ok { b.counts[.failed, default: 0] += 1 }
             if !s.supported { b.counts[.unsupported, default: 0] += 1 }
         }
         board = b
     }
 
     private var visible: [LegadoSource] {
-        switch filter {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base: [LegadoSource] = switch filter {
         case .all: store.sources
         case .on: store.sources.filter { $0.isOn && $0.supported }
         case .login: store.sources.filter { $0.hasLogin && !board.loggedIn.contains($0.id) }
+        case .js: store.sources.filter(\.isJsSource)
+        case .failed: store.sources.filter { if let c = board.checks[$0.id] { c.status != .ok } else { false } }
         case .unsupported: store.sources.filter { !$0.supported }
+        }
+        guard !q.isEmpty else { return base }
+        return base.filter {
+            $0.bookSourceName.localizedCaseInsensitiveContains(q)
+            || ($0.bookSourceGroup ?? "").localizedCaseInsensitiveContains(q)
+            || $0.bookSourceUrl.localizedCaseInsensitiveContains(q)
         }
     }
 
-    /// ui-redesign 08: count line, status chips with counts, one card of rows with status labels, 登录 and a switch.
-    /// (A List for its native swipe-to-delete; every row draws the app's own card.)
     var body: some View {
         let list = visible
         List {
@@ -53,11 +69,16 @@ struct NovelSourcesView: View {
                 Text("共 \(board.total) 个书源 · 已启用 \(board.enabled) 个")
                     .dsFont(13, relativeTo: .footnote).foregroundStyle(STVTheme.secondary)
                     .padding(.horizontal, 20).padding(.top, 4)
+                if !store.sources.isEmpty {
+                    DSTextField("搜索书源名 / 分组 / 域名", text: $query, icon: "magnifyingglass")
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        .padding(.horizontal, 16).padding(.top, 8)
+                }
                 filterChips.padding(.top, 10).padding(.bottom, 14)
             }
             .listRowInsets(EdgeInsets()).listRowBackground(Color.clear).listRowSeparator(.hidden)
             if store.sources.isEmpty {
-                DSEmptyState("还没有书源", systemImage: "books.vertical", message: "导入「阅读」(Legado) 的书源 JSON。App 不内置任何书源。", actionTitle: "导入书源") { importing = true }
+                DSEmptyState("还没有书源", systemImage: "books.vertical", message: "导入「阅读」(Legado) 的书源 JSON 或单文件 JS 书源（.js）。App 不内置任何书源。", actionTitle: "导入书源") { importing = true }
                     .listRowInsets(EdgeInsets()).listRowBackground(Color.clear).listRowSeparator(.hidden)
             }
             ForEach(Array(list.enumerated()), id: \.element.id) { i, s in
@@ -70,7 +91,7 @@ struct NovelSourcesView: View {
             }
             .onDelete { idx in store.remove(Set(idx.map { list[$0].id })) }
             if !store.sources.isEmpty {
-                Text("左滑可删除书源。").font(.system(size: 12)).foregroundStyle(STVTheme.tertiary)
+                Text("长按书源可调试、编辑源码或导出 JSON；左滑可删除。").font(.system(size: 12)).foregroundStyle(STVTheme.tertiary)
                     .padding(.horizontal, 30).padding(.top, 14).padding(.bottom, 40)
                     .listRowInsets(EdgeInsets()).listRowBackground(Color.clear).listRowSeparator(.hidden)
             }
@@ -81,8 +102,16 @@ struct NovelSourcesView: View {
             DSNavBar(title: "书源") {
                 DSBackButton { dismiss() }
             } trailing: {
-                RoundIconButton(systemName: "plus", tone: .accent, size: 44) { importing = true }
-                    .accessibilityLabel("导入书源").accessibilityIdentifier("sources.add")
+                HStack(spacing: 8) {
+                    RoundIconButton(systemName: "wand.and.stars", tone: .glass, size: 40) { showReplaceRules = true }
+                        .accessibilityLabel("替换净化规则")
+                    if !store.sources.isEmpty {
+                        RoundIconButton(systemName: "checkmark.shield", tone: .glass, size: 40) { showChecker = true }
+                            .accessibilityLabel("批量校验书源")
+                    }
+                    RoundIconButton(systemName: "plus", tone: .accent, size: 40) { importing = true }
+                        .accessibilityLabel("导入书源").accessibilityIdentifier("sources.add")
+                }
             }
         }
         .dsAmbient(cool: true)
@@ -91,7 +120,29 @@ struct NovelSourcesView: View {
         .onAppear { classify() }
         .onReceive(store.$sources.receive(on: DispatchQueue.main)) { _ in classify() }
         .compatOnChange(of: login?.id) { classify() }
+        .compatOnChange(of: showChecker) { if !showChecker { classify() } }
         .sheet(item: $login) { s in NovelSourceLoginView(source: s) }
+        .sheet(item: $debugging) { s in NovelSourceDebugView(source: s) }
+        .sheet(item: $editing) { s in
+            NovelSourceEditorView(source: s) { updated in
+                store.update(updated, replacing: s.id)
+                classify()
+            }
+        }
+        .sheet(isPresented: $showChecker) {
+            NovelSourceCheckView(
+                sources: visible,
+                onDisableFailed: { ids in
+                    for s in store.sources where ids.contains(s.id) { store.setEnabled(s, false) }
+                    classify()
+                },
+                onDeleteFailed: { ids in
+                    store.remove(ids)
+                    classify()
+                }
+            )
+        }
+        .sheet(isPresented: $showReplaceRules) { NovelReplaceRulesView() }
         .sheet(isPresented: $importing) { NovelImportSheet(showBooks: false) }
     }
 
@@ -111,16 +162,33 @@ struct NovelSourcesView: View {
         }
     }
 
+    private func typeBadge(_ s: LegadoSource) -> String? {
+        if s.isJsSource { return "JS" }
+        if s.isRSS { return "RSS" }
+        switch s.bookSourceType ?? 0 {
+        case 1: return "有声"
+        case 2: return "漫画"
+        case 3: return "下载"
+        case 4: return "视频"
+        default: return nil
+        }
+    }
+
     private func row(_ s: LegadoSource) -> some View {
         let loggedIn = board.loggedIn.contains(s.id)
         let dim = !s.supported
+        let check = board.checks[s.id]
         return HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 7) {
+                HStack(spacing: 6) {
                     Text(s.bookSourceName).font(.system(size: 16, weight: .medium)).foregroundStyle(STVTheme.text).lineLimit(1)
                         .opacity(dim ? 0.5 : 1)
+                    if let badge = typeBadge(s) { DSStatus(text: badge, tone: .accent) }
                     if !s.supported { DSStatus(text: "暂不支持", tone: .muted) }
                     else if s.hasLogin { DSStatus(text: loggedIn ? "已登录" : "需登录", tone: loggedIn ? .ok : .warn) }
+                    if let check {
+                        DSStatus(text: check.status == .ok ? "\(check.latencyMs)ms" : check.status.rawValue, tone: check.status == .ok ? .ok : .warn)
+                    }
                 }
                 Text(subtitle(s)).font(.system(size: 12)).foregroundStyle(STVTheme.secondary).lineLimit(1).opacity(dim ? 0.5 : 1)
             }
@@ -133,13 +201,24 @@ struct NovelSourcesView: View {
         }
         .frame(minHeight: 66)
         .contentShape(Rectangle())
-        .contextMenu { if s.hasLogin { Button("登录", systemImage: "person.crop.circle") { login = s } } }
-        .swipeActions(edge: .leading) { if s.hasLogin { Button("登录") { login = s }.tint(STVTheme.accent) } }
+        .contextMenu {
+            if s.hasLogin { Button("登录", systemImage: "person.crop.circle") { login = s } }
+            Button("单源调试", systemImage: "ladybug") { debugging = s }
+            Button(s.isJsSource ? "编辑 JS 源码" : "编辑 JSON", systemImage: "chevron.left.forwardslash.chevron.right") { editing = s }
+            Button("复制导出", systemImage: "doc.on.doc") {
+                UIPasteboard.general.string = s.isJsSource ? (s.mainJs ?? "") : s.prettyJSON()
+            }
+            Button("删除", systemImage: "trash", role: .destructive) { store.remove([s.id]) }
+        }
+        .swipeActions(edge: .leading) {
+            Button("调试") { debugging = s }.tint(.blue)
+            if s.hasLogin { Button("登录") { login = s }.tint(STVTheme.accent) }
+        }
     }
 
     private func subtitle(_ s: LegadoSource) -> String {
         let group = (s.bookSourceGroup ?? "").isEmpty ? "综合" : s.bookSourceGroup!
-        if !s.supported { return group + " · " + ([2,3].contains(s.bookSourceType ?? 0) ? "暂未实现的源类型" : "没有搜索 / 发现地址") }
+        if !s.supported { return group + " · 缺少搜索/发现地址或未知源类型" }
         return [group, URL(string: s.bookSourceUrl)?.host].compactMap { $0 }.joined(separator: " · ")
     }
 }

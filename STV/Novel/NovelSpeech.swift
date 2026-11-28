@@ -88,6 +88,7 @@ final class NovelSpeaker: NSObject, AVSpeechSynthesizerDelegate, ObservableObjec
         synth.stopSpeaking(at: .immediate)
         chapter = index
         text = t
+        AppAudioArbiter.shared.claim(.novelTTS)
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playback, mode: .spokenAudio)
         try? session.setActive(true)
@@ -114,6 +115,7 @@ final class NovelSpeaker: NSObject, AVSpeechSynthesizerDelegate, ObservableObjec
     func toggle() { paused ? resume() : pause() }
 
     func stop() {
+        let wasActive = active
         generation += 1
         active = false
         paused = false
@@ -122,7 +124,12 @@ final class NovelSpeaker: NSObject, AVSpeechSynthesizerDelegate, ObservableObjec
         synth.stopSpeaking(at: .immediate)
         sleep = .off
         unregisterRemote()
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        if wasActive && AppAudioArbiter.shared.canClearNowPlaying(for: .novelTTS) {
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        }
+        if wasActive {
+            AppAudioArbiter.shared.release(.novelTTS)
+        }
     }
 
     /// ±1 sentence.

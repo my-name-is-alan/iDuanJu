@@ -100,7 +100,11 @@ struct NovelMediaPlayer: View {
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
             if let item = notification.object as? AVPlayerItem, item === player?.currentItem, index + 1 < chapters.count { selected = index + 1 }
         }
-        .onDisappear { stop() }
+        .onAppear { MusicPlayerEngine.shared.enterImmersive("novelAudio") }
+        .onDisappear {
+            MusicPlayerEngine.shared.leaveImmersive("novelAudio")
+            stop()
+        }
     }
 
     private var artwork: some View {
@@ -142,7 +146,7 @@ struct NovelMediaPlayer: View {
         return url
     }
     @MainActor private func playAudio() async {
-        stop(); failure = nil
+        stop(releasingAudio: false); failure = nil
         do {
             let url = try await mediaURL(index)
             let nextToken = LocalHLSProxy.token(of: url.absoluteString)
@@ -151,13 +155,18 @@ struct NovelMediaPlayer: View {
                 return
             }
             token = nextToken
+            AppAudioArbiter.shared.claim(.novelAudio)
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
             let next = AVPlayer(url: url); player = next; clock.player = next; next.play()
         } catch { if !Task.isCancelled { failure = error.localizedDescription } }
     }
-    @MainActor private func stop() {
+    @MainActor private func stop(releasingAudio: Bool = true) {
+        let wasActive = player != nil
         player?.pause(); player = nil; clock.reset()
         if let token { LocalHLSProxy.shared.release(token) }; token = nil
+        if releasingAudio && wasActive {
+            AppAudioArbiter.shared.release(.novelAudio)
+        }
     }
 }
 

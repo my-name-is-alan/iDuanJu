@@ -116,14 +116,3 @@ private fun ScrubTrack(clock: PlaybackClock, thick: Boolean, preview: SeekPrevie
         drawCircle(Color.White, knob, Offset(x, cy))
     }
 }
-
-/** 2 dp pure white edge progress while the HUD is hidden; reads the clock in the draw phase only. */
-@Composable
-internal fun EdgeProgressBar(clock: PlaybackClock, modifier: Modifier = Modifier) {
-    Box(modifier.fillMaxWidth().height(2.dp).drawBehind {
-        drawRect(Color.White.copy(0.16f))
-        val d = clock.dur
-        val f = if (d > 0) (clock.pos.toFloat() / d).coerceIn(0f, 1f) else 0f
-        if (f > 0f) drawRect(Color.White.copy(0.85f), size = Size(size.width * f, size.height))
-    })
-}
